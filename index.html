@@ -91,23 +91,6 @@
     50% { filter: brightness(1.3); }
   }
 
-  /* ---------- Corner flash ---------- */
-  #cornerFlash {
-    position: absolute; top: 38%; left: 50%; transform: translate(-50%, -50%);
-    pointer-events: none;
-    font-size: clamp(28px, 7vw, 56px); font-weight: 900; letter-spacing: 3px;
-    color: #fff; text-shadow: 0 0 18px #ffd24a, 0 2px 8px #000;
-    opacity: 0;
-    transition: opacity 0.2s;
-  }
-  #cornerFlash.on { opacity: 1; animation: cornerAnim 1.4s forwards; }
-  @keyframes cornerAnim {
-    0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.6); }
-    15%  { opacity: 1; transform: translate(-50%, -50%) scale(1.08); }
-    70%  { opacity: 1; transform: translate(-50%, -50%) scale(1.0); }
-    100% { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
-  }
-
   /* ---------- Overlays (menu / pause / gameover) ---------- */
   .overlay {
     position: absolute; inset: 0;
@@ -307,7 +290,6 @@
   <button id="pauseBtn" title="Pause">⏸</button>
 
   <div id="vignette"></div>
-  <div id="cornerFlash">🏟️ CORNER!</div>
   <div id="touchHint">Swipe to move • Tap or swipe up to jump</div>
 
   <!-- Menu overlay -->
@@ -409,9 +391,54 @@ const SPAWN_INTERVAL_MIN = 0.55;
 const COIN_VALUE = 1;
 const FAR_Z = -180;
 const DESPAWN_Z = 8;
-const PRESSURE_MS = 30000;
+const PRESSURE_MS = 15000;
 const REF_FAR = 0.85;
 const REF_CLOSE = 0.18;
+
+// =====================================================
+// OVAL STADIUM GEOMETRY
+// =====================================================
+// The player runs counterclockwise around an oval track surrounding a rectangular pitch.
+// (logical S.distance, S.laneX) maps to world (x, z, yaw) via ovalAt().
+const STAD_RX_PITCH  = 30;   // inner radius (touches pitch boundary)
+const STAD_RZ_PITCH  = 44;
+const STAD_RX_TRACK  = 34;   // player centerline radius
+const STAD_RZ_TRACK  = 48;
+const STAD_RX_OUTER  = 38;   // outer edge of track / inner edge of stands
+const STAD_RZ_OUTER  = 52;
+const STAD_RX_ROOF   = 60;   // outer edge of roof / stands
+const STAD_RZ_ROOF   = 74;
+const PITCH_W = 54;          // rectangular pitch dimensions (inscribed in oval)
+const PITCH_L = 80;
+const HALFWAY_Z_OVAL = 0;    // halfway line of pitch in world Z
+
+// Ramanujan ellipse perimeter approximation at the player's lane
+const PLAYER_CIRC = Math.PI * (3 * (STAD_RX_TRACK + STAD_RZ_TRACK) -
+  Math.sqrt((3 * STAD_RX_TRACK + STAD_RZ_TRACK) * (STAD_RX_TRACK + 3 * STAD_RZ_TRACK)));
+
+// Map (arcLen, radialOffset) → world {x, z, yaw}. radialOffset > 0 = away from oval center.
+function ovalAt(arcLen, radialOffset = 0) {
+  // theta increases counterclockwise. Start at +x axis. After 1/4 lap at +z axis.
+  const theta = (arcLen / PLAYER_CIRC) * 2 * Math.PI;
+  const ct = Math.cos(theta), st = Math.sin(theta);
+  // Centerline (player's lane=0 path)
+  const cx = STAD_RX_TRACK * ct;
+  const cz = STAD_RZ_TRACK * st;
+  // Tangent direction (direction of motion)
+  const tx = -STAD_RX_TRACK * st;
+  const tz =  STAD_RZ_TRACK * ct;
+  const tlen = Math.hypot(tx, tz);
+  // Outward normal (perpendicular to tangent, rotated 90° CW)
+  const onx = tz / tlen;
+  const onz = -tx / tlen;
+  const x = cx + radialOffset * onx;
+  const z = cz + radialOffset * onz;
+  return {
+    x, z,
+    yaw: Math.atan2(tx, tz),
+    theta,
+  };
+}
 
 // =====================================================
 // CATALOG (cosmetics + characters)
@@ -517,20 +544,20 @@ function sCaught() { tone(220, 0.4, 'sawtooth', 0.18); tone(110, 0.5, 'square', 
 // =====================================================
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.25));
+renderer.shadowMap.enabled = false; // disabled — preview perf can't handle shadow pass
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.15;
+renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x08090f);
-scene.fog = new THREE.Fog(0x0b0e18, 90, 210);
+scene.background = new THREE.Color(0xa3c8e8);
+scene.fog = new THREE.Fog(0xc6dcef, 110, 280);
 
 const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 400);
-camera.position.set(0.8, 5.4, 9);
-camera.lookAt(-1.2, 1.5, -4);
+// Initial camera position: behind player at theta=0 on the oval (calibrated when ovalAt is available)
+camera.position.set(STAD_RX_TRACK + 1, 5.4, 0);
+camera.lookAt(STAD_RX_TRACK, 1.5, 5);
 
 function onResize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -542,23 +569,24 @@ window.addEventListener('resize', onResize);
 onResize();
 
 // ----- Lighting -----
-scene.add(new THREE.HemisphereLight(0xaabbd0, 0x2a4020, 0.55));
-const sun = new THREE.DirectionalLight(0xfff7e8, 0.6);
-sun.position.set(-18, 30, 14);
+// Daytime stadium: bright sun, warm hemisphere, soft fill
+scene.add(new THREE.HemisphereLight(0xcfe2f5, 0x4a6b3a, 0.95));
+const sun = new THREE.DirectionalLight(0xfff4d8, 1.6);
+sun.position.set(-22, 38, 18);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.camera.left = -18; sun.shadow.camera.right = 18;
-sun.shadow.camera.top = 18; sun.shadow.camera.bottom = -18;
+sun.shadow.mapSize.set(1024, 1024);
+sun.shadow.camera.left = -22; sun.shadow.camera.right = 22;
+sun.shadow.camera.top = 22; sun.shadow.camera.bottom = -22;
 sun.shadow.camera.near = 1; sun.shadow.camera.far = 80;
 sun.shadow.bias = -0.0004;
 sun.shadow.normalBias = 0.04;
 scene.add(sun);
-const fill = new THREE.DirectionalLight(0xaabbff, 0.25);
+const fill = new THREE.DirectionalLight(0xb8d2f0, 0.35);
 fill.position.set(20, 14, -6);
 scene.add(fill);
-// 4 corner floodlights (bright — night game)
+// Floodlight pylons are present visually but contribute mild light during the day
 for (const [px, pz] of [[-40, -10], [10, -10], [-40, -180], [10, -180]]) {
-  const s = new THREE.PointLight(0xfff8e8, 2.2, 180, 1.4);
+  const s = new THREE.PointLight(0xfff8e8, 0.35, 60, 1.4);
   s.position.set(px, 24, pz);
   scene.add(s);
 }
@@ -568,8 +596,8 @@ for (const [px, pz] of [[-40, -10], [10, -10], [-40, -180], [10, -180]]) {
   const skyGeo = new THREE.SphereGeometry(220, 24, 16);
   const skyMat = new THREE.ShaderMaterial({
     uniforms: {
-      top:    { value: new THREE.Color(0x04050b) },
-      bottom: { value: new THREE.Color(0x0d1022) },
+      top:    { value: new THREE.Color(0x5c95c8) },
+      bottom: { value: new THREE.Color(0xd8e8f4) },
     },
     vertexShader: `varying vec3 vWorld; void main(){ vWorld = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
     fragmentShader: `varying vec3 vWorld; uniform vec3 top; uniform vec3 bottom;
@@ -584,68 +612,20 @@ for (const [px, pz] of [[-40, -10], [10, -10], [-40, -180], [10, -180]]) {
 }
 
 // =====================================================
-// WORLD LAYOUT
+// WORLD LAYOUT (OVAL STADIUM)
 // =====================================================
-// The runner travels down the perimeter "athletic track" at the touchline of a soccer pitch.
-//   Track lanes are at x ∈ [-LANE_W, 0, +LANE_W]
-//   Pitch is to the LEFT of the track (x ≲ PITCH_INNER_X) — that's where the match plays.
-//   Stands are to the RIGHT (x ≳ STANDS_X) and across the pitch (x ≪ PITCH_INNER_X − pitchWidth).
+// Player runs counterclockwise around an oval track surrounding a rectangular pitch.
+// All world geometry is laid out in the (x, z) plane using ovalAt() for arc-based positions.
+
+// Legacy constants kept so older code paths don't crash (match actors, etc.)
 const TRACK_LEN = 240;
-const PITCH_INNER_X = -3.6;     // touchline (between track and pitch)
-const PITCH_WIDTH = 60;          // pitch extends 60 units to the left
-const STANDS_X = 3.6;            // start of near stands
-const PITCH_CENTER_X = PITCH_INNER_X - PITCH_WIDTH / 2;
-const PITCH_FAR_X = PITCH_INNER_X - PITCH_WIDTH;
+const PITCH_INNER_X = -3.6;
+const PITCH_WIDTH = 60;
+const STANDS_X = 3.6;
+const PITCH_CENTER_X = 0;
+const PITCH_FAR_X = -PITCH_W / 2;
 
-// ----- Track surface (red rubber / asphalt) -----
-{
-  const trackCanvas = document.createElement('canvas');
-  trackCanvas.width = 64; trackCanvas.height = 256;
-  const tx = trackCanvas.getContext('2d');
-  // Vertical reddish gradient with subtle banding
-  for (let i = 0; i < 256; i++) {
-    const v = 60 + ((i * 7) % 9);
-    tx.fillStyle = `rgb(${168 + v / 4 | 0}, ${72 + v / 6 | 0}, ${58 + v / 8 | 0})`;
-    tx.fillRect(0, i, 64, 1);
-  }
-  const tt = new THREE.CanvasTexture(trackCanvas);
-  tt.wrapS = THREE.RepeatWrapping; tt.wrapT = THREE.RepeatWrapping;
-  tt.repeat.set(1, TRACK_LEN / 6);
-  tt.colorSpace = THREE.SRGBColorSpace;
-  const trackGeo = new THREE.PlaneGeometry(7.4, TRACK_LEN);
-  trackGeo.rotateX(-Math.PI / 2);
-  const trackMat = new THREE.MeshStandardMaterial({ map: tt, roughness: 0.92, metalness: 0.0 });
-  const track = new THREE.Mesh(trackGeo, trackMat);
-  track.position.set(0, 0, -TRACK_LEN / 2 + 10);
-  track.receiveShadow = true;
-  scene.add(track);
-}
-
-// ----- Track lane lines (white) -----
-function addLaneLine(x, opacity = 0.55) {
-  const g = new THREE.PlaneGeometry(0.1, TRACK_LEN);
-  g.rotateX(-Math.PI / 2);
-  const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity });
-  const mesh = new THREE.Mesh(g, m);
-  mesh.position.set(x, 0.01, -TRACK_LEN / 2 + 10);
-  scene.add(mesh);
-}
-addLaneLine(-LANE_W / 2 - LANE_W / 2);
-addLaneLine(LANE_W / 2 + LANE_W / 2);
-addLaneLine(-LANE_W * 1.5 - 0.5, 0.7);
-addLaneLine(LANE_W * 1.5 + 0.5, 0.7);
-
-// ----- Touchline (between track and pitch) -----
-{
-  const g = new THREE.PlaneGeometry(0.22, TRACK_LEN);
-  g.rotateX(-Math.PI / 2);
-  const m = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  const mesh = new THREE.Mesh(g, m);
-  mesh.position.set(PITCH_INNER_X - 0.1, 0.015, -TRACK_LEN / 2 + 10);
-  scene.add(mesh);
-}
-
-// ----- Pitch (grass to the LEFT of the track) -----
+// ----- Track surface (red rubber oval ring) -----
 const pitchStripeCanvas = document.createElement('canvas');
 pitchStripeCanvas.width = 32; pitchStripeCanvas.height = 256;
 {
@@ -657,81 +637,132 @@ pitchStripeCanvas.width = 32; pitchStripeCanvas.height = 256;
 }
 const pitchTex = new THREE.CanvasTexture(pitchStripeCanvas);
 pitchTex.wrapS = THREE.RepeatWrapping; pitchTex.wrapT = THREE.RepeatWrapping;
-pitchTex.repeat.set(PITCH_WIDTH / 5, TRACK_LEN / 6);
+pitchTex.repeat.set(PITCH_W / 5, PITCH_L / 6);
 pitchTex.colorSpace = THREE.SRGBColorSpace;
-const pitchMat = new THREE.MeshStandardMaterial({ map: pitchTex, roughness: 0.95, metalness: 0 });
-const pitchGeo = new THREE.PlaneGeometry(PITCH_WIDTH, TRACK_LEN);
-pitchGeo.rotateX(-Math.PI / 2);
-const pitch = new THREE.Mesh(pitchGeo, pitchMat);
-pitch.position.set(PITCH_CENTER_X, -0.005, -TRACK_LEN / 2 + 10);
-pitch.receiveShadow = true;
-scene.add(pitch);
 
-// ----- Pitch markings -----
-function addPitchLine(x, z, w, l, opacity = 0.85) {
+// ----- Oval track surface (red rubber) -----
+{
+  // Outer + inner oval shapes
+  const SEGS = 48;
+  const outerShape = new THREE.Shape();
+  for (let i = 0; i <= SEGS; i++) {
+    const t = (i / SEGS) * 2 * Math.PI;
+    const x = STAD_RX_OUTER * Math.cos(t);
+    const z = STAD_RZ_OUTER * Math.sin(t);
+    if (i === 0) outerShape.moveTo(x, z);
+    else outerShape.lineTo(x, z);
+  }
+  const innerHole = new THREE.Path();
+  for (let i = 0; i <= SEGS; i++) {
+    const t = (i / SEGS) * 2 * Math.PI;
+    const x = STAD_RX_PITCH * Math.cos(t);
+    const z = STAD_RZ_PITCH * Math.sin(t);
+    if (i === 0) innerHole.moveTo(x, z);
+    else innerHole.lineTo(x, z);
+  }
+  outerShape.holes.push(innerHole);
+  const trackGeo = new THREE.ShapeGeometry(outerShape, 36);
+  trackGeo.rotateX(-Math.PI / 2);
+  const trackMat = new THREE.MeshStandardMaterial({ color: 0xb86555, roughness: 0.92 });
+  const track = new THREE.Mesh(trackGeo, trackMat);
+  track.position.y = 0.005;
+  track.receiveShadow = true;
+  scene.add(track);
+}
+
+// ----- Oval lane lines (white) using TubeGeometry -----
+class OvalCurve extends THREE.Curve {
+  constructor(rx, rz) { super(); this.rx = rx; this.rz = rz; }
+  getPoint(t, target = new THREE.Vector3()) {
+    const a = t * 2 * Math.PI;
+    return target.set(this.rx * Math.cos(a), 0, this.rz * Math.sin(a));
+  }
+}
+{
+  const lineMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  // 4 lane lines bracket the 3 lanes: at -1.5L, -0.5L, +0.5L, +1.5L (lane width)
+  const offsets = [-1.5 * LANE_W, -0.5 * LANE_W, 0.5 * LANE_W, 1.5 * LANE_W];
+  for (const off of offsets) {
+    const rx = STAD_RX_TRACK + off;
+    const rz = STAD_RZ_TRACK + off;
+    const tubeGeo = new THREE.TubeGeometry(new OvalCurve(rx, rz), 48, 0.05, 4, true);
+    const tube = new THREE.Mesh(tubeGeo, lineMat);
+    tube.position.y = 0.015;
+    scene.add(tube);
+  }
+  // Inner touchline (between track and pitch) — thicker
+  {
+    const tubeGeo = new THREE.TubeGeometry(new OvalCurve(STAD_RX_PITCH, STAD_RZ_PITCH), 48, 0.10, 4, true);
+    const tube = new THREE.Mesh(tubeGeo, lineMat);
+    tube.position.y = 0.018;
+    scene.add(tube);
+  }
+}
+
+// ----- Pitch (rectangular grass in the center of the oval) -----
+const pitchMat = new THREE.MeshStandardMaterial({ map: pitchTex, roughness: 0.95, metalness: 0 });
+{
+  const pitchGeo = new THREE.PlaneGeometry(PITCH_W, PITCH_L);
+  pitchGeo.rotateX(-Math.PI / 2);
+  const pitch = new THREE.Mesh(pitchGeo, pitchMat);
+  pitch.position.set(0, 0, 0);
+  pitch.receiveShadow = true;
+  scene.add(pitch);
+}
+
+// ----- Pitch markings (rectangular pitch oriented in z-direction) -----
+function addPitchLine(x, z, w, l, opacity = 0.9) {
   const g = new THREE.PlaneGeometry(w, l);
   g.rotateX(-Math.PI / 2);
   const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity });
   const mesh = new THREE.Mesh(g, m);
-  mesh.position.set(x, 0.012, z);
+  mesh.position.set(x, 0.013, z);
   scene.add(mesh);
 }
-// Far touchline (white painted line)
-addPitchLine(PITCH_FAR_X + 0.5, -TRACK_LEN / 2 + 10, 0.22, TRACK_LEN);
-// Halfway line + center circle (mid-track Z)
-const HALFWAY_Z = -TRACK_LEN / 2 + 10;
-addPitchLine(PITCH_CENTER_X, HALFWAY_Z, PITCH_WIDTH, 0.22);
+// Touchlines (long sides of the rectangular pitch)
+addPitchLine( PITCH_W / 2 - 0.1, 0, 0.22, PITCH_L);
+addPitchLine(-PITCH_W / 2 + 0.1, 0, 0.22, PITCH_L);
+// Goal lines (short sides)
+addPitchLine(0,  PITCH_L / 2 - 0.1, PITCH_W, 0.22);
+addPitchLine(0, -PITCH_L / 2 + 0.1, PITCH_W, 0.22);
+// Halfway line
+addPitchLine(0, 0, PITCH_W, 0.22);
+// Center circle
 {
   const ring = new THREE.RingGeometry(8, 8.2, 64);
   ring.rotateX(-Math.PI / 2);
   const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide });
   const circle = new THREE.Mesh(ring, m);
-  circle.position.set(PITCH_CENTER_X, 0.013, HALFWAY_Z);
+  circle.position.set(0, 0.014, 0);
   scene.add(circle);
-  // Center spot
-  const spot = new THREE.Mesh(
-    new THREE.CircleGeometry(0.3, 16),
-    new THREE.MeshBasicMaterial({ color: 0xffffff })
-  );
+  const spot = new THREE.Mesh(new THREE.CircleGeometry(0.3, 16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
   spot.rotation.x = -Math.PI / 2;
-  spot.position.set(PITCH_CENTER_X, 0.014, HALFWAY_Z);
+  spot.position.set(0, 0.015, 0);
   scene.add(spot);
 }
-// Penalty boxes at both ends of the pitch
-for (const goalZ of [-TRACK_LEN + 15, 5]) {
-  // Big penalty box: 16.5m deep (x), 40.3m wide (z) — scaled
-  addPitchLine(PITCH_FAR_X + 8,  goalZ - 18, 16, 0.22);
-  addPitchLine(PITCH_FAR_X + 8,  goalZ + 18, 16, 0.22);
-  addPitchLine(PITCH_FAR_X + 16, goalZ, 0.22, 36);
-  // Small box
-  addPitchLine(PITCH_FAR_X + 4,  goalZ - 8,  8,  0.22);
-  addPitchLine(PITCH_FAR_X + 4,  goalZ + 8,  8,  0.22);
-  addPitchLine(PITCH_FAR_X + 8,  goalZ, 0.22, 16);
+// Penalty boxes at both ends
+for (const goalZ of [-PITCH_L / 2, PITCH_L / 2]) {
+  const sign = Math.sign(goalZ);
+  // Big box (16.5m deep, 40.3m wide ≈ scaled to pitch)
+  addPitchLine(-13, goalZ - sign * 9, 0.22, 18);
+  addPitchLine( 13, goalZ - sign * 9, 0.22, 18);
+  addPitchLine(0,   goalZ - sign * 18, 26, 0.22);
+  // Small box (5.5m deep, 18.3m wide)
+  addPitchLine(-6, goalZ - sign * 4, 0.22, 8);
+  addPitchLine( 6, goalZ - sign * 4, 0.22, 8);
+  addPitchLine(0,  goalZ - sign * 8, 12, 0.22);
   // Penalty spot
-  const pspot = new THREE.Mesh(
-    new THREE.CircleGeometry(0.25, 12),
-    new THREE.MeshBasicMaterial({ color: 0xffffff })
-  );
+  const pspot = new THREE.Mesh(new THREE.CircleGeometry(0.25, 12), new THREE.MeshBasicMaterial({ color: 0xffffff }));
   pspot.rotation.x = -Math.PI / 2;
-  pspot.position.set(PITCH_FAR_X + 11, 0.014, goalZ);
+  pspot.position.set(0, 0.014, goalZ - sign * 12);
   scene.add(pspot);
-  // Penalty arc (D)
-  const arcDir = goalZ > -80 ? -1 : 1; // arc points away from goal line
-  const penArc = new THREE.RingGeometry(9.15, 9.4, 32, 1, Math.PI * 0.22, Math.PI * 0.56);
-  penArc.rotateX(-Math.PI / 2);
-  const penArcMesh = new THREE.Mesh(penArc, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, side: THREE.DoubleSide }));
-  penArcMesh.position.set(PITCH_FAR_X + 11, 0.013, goalZ + arcDir * 0);
-  penArcMesh.rotation.y = arcDir > 0 ? 0 : Math.PI;
-  scene.add(penArcMesh);
 }
-// Corner arcs — quarter-circles at all 4 pitch corners
-const NEAR_GOAL_Z = 5;
-const FAR_GOAL_Z = -TRACK_LEN + 15;
-for (const [cz, cx, rot] of [
-  [NEAR_GOAL_Z,  PITCH_INNER_X - 0.5, Math.PI],
-  [NEAR_GOAL_Z,  PITCH_FAR_X   + 0.5, Math.PI / 2],
-  [FAR_GOAL_Z,   PITCH_INNER_X - 0.5, -Math.PI / 2],
-  [FAR_GOAL_Z,   PITCH_FAR_X   + 0.5, 0],
+// Corner arcs
+for (const [cx, cz, rot] of [
+  [ PITCH_W / 2 - 0.05,  PITCH_L / 2 - 0.05, Math.PI],
+  [-PITCH_W / 2 + 0.05,  PITCH_L / 2 - 0.05, -Math.PI / 2],
+  [ PITCH_W / 2 - 0.05, -PITCH_L / 2 + 0.05, Math.PI / 2],
+  [-PITCH_W / 2 + 0.05, -PITCH_L / 2 + 0.05, 0],
 ]) {
   const arc = new THREE.RingGeometry(0.9, 1.1, 16, 1, 0, Math.PI / 2);
   arc.rotateX(-Math.PI / 2);
@@ -741,22 +772,19 @@ for (const [cz, cx, rot] of [
   scene.add(arcM);
 }
 
-// ----- Goalposts at far ends of pitch -----
+// ----- Goalposts at the two ends of the pitch -----
 function buildGoalpost() {
   const g = new THREE.Group();
   const postMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3, metalness: 0.5 });
   const W = 7.32, H = 2.44;
-  // crossbar
   const cross = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, W, 8), postMat);
   cross.rotation.x = Math.PI / 2;
   cross.position.set(0, H, 0);
-  // posts
   const leftPost = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, H, 8), postMat);
   leftPost.position.set(0, H / 2, -W / 2);
   const rightPost = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, H, 8), postMat);
   rightPost.position.set(0, H / 2, W / 2);
   g.add(cross, leftPost, rightPost);
-  // net (wireframe plane)
   const netMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.22, wireframe: true, side: THREE.DoubleSide });
   const netBack = new THREE.Mesh(new THREE.PlaneGeometry(W, H, 8, 5), netMat);
   netBack.rotation.y = Math.PI / 2;
@@ -770,16 +798,16 @@ function buildGoalpost() {
 }
 {
   const g1 = buildGoalpost();
-  g1.position.set(PITCH_FAR_X + 0.6, 0, -TRACK_LEN + 15);
-  g1.rotation.y = Math.PI / 2;
+  g1.position.set(0, 0, PITCH_L / 2);
+  g1.rotation.y = -Math.PI / 2;
   scene.add(g1);
   const g2 = buildGoalpost();
-  g2.position.set(PITCH_FAR_X + 0.6, 0, 5);
+  g2.position.set(0, 0, -PITCH_L / 2);
   g2.rotation.y = Math.PI / 2;
   scene.add(g2);
 }
 
-// ----- Soccer ball on the pitch -----
+// ----- Soccer ball on the pitch (free-moving) -----
 const matchBall = (() => {
   const g = new THREE.Group();
   const ball = new THREE.Mesh(
@@ -787,7 +815,6 @@ const matchBall = (() => {
     new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.5 })
   );
   ball.castShadow = true;
-  // Pentagonal hex pattern via small dark patches
   for (let i = 0; i < 8; i++) {
     const patch = new THREE.Mesh(
       new THREE.CircleGeometry(0.07, 6),
@@ -809,225 +836,153 @@ const matchBall = (() => {
   g.userData = { ball, ballMesh: ball };
   return g;
 })();
-matchBall.position.set(PITCH_CENTER_X + 3, 0.32, HALFWAY_Z);
+matchBall.position.set(0, 0.32, 0);
 scene.add(matchBall);
 
 // =====================================================
-// STADIUM (near stands on right + far stands across the pitch)
+// OVAL STANDS (stepped tiers around the outside of the track) — InstancedMesh
 // =====================================================
-const jumboGroup = { screen: null };
+const SEGS = 24;
+const TIERS = 6;
+const TIER_STEP_R = 1.6;
+const TIER_STEP_Y = 1.5;
+const TIER_DEPTH = 2.1;
+const SEG_BAND_COLORS = [0xa1102b, 0x0d4ea6, 0xffd400, 0x0a5b2c, 0xffffff, 0x6600cc];
 
-function buildNearStands() {
-  const g = new THREE.Group();
-  const chunkLen = 16;
-  const chunks = Math.ceil(TRACK_LEN / chunkLen) + 2;
-  for (let i = 0; i < chunks; i++) {
-    const z = -i * chunkLen + 10;
-    // Ad board on the field edge
-    const adColor = ['#d11', '#06c', '#0a4', '#fa0'][i % 4];
-    const ad = new THREE.Mesh(
-      new THREE.BoxGeometry(0.35, 0.7, chunkLen - 0.4),
-      new THREE.MeshStandardMaterial({ color: new THREE.Color(adColor), emissive: new THREE.Color(adColor), emissiveIntensity: 0.22, roughness: 0.4 })
-    );
-    ad.position.set(STANDS_X + 0.18, 0.35, z);
-    ad.castShadow = true;
-    g.add(ad);
-    // Low concrete wall (front of the stand)
-    const wall = new THREE.Mesh(
-      new THREE.BoxGeometry(0.4, 1.2, chunkLen),
-      new THREE.MeshStandardMaterial({ color: 0xbbb7ac, roughness: 0.9 })
-    );
-    wall.position.set(STANDS_X + 0.7, 0.6, z);
-    g.add(wall);
-    // Tier 1 (lower stand)
-    const lower = new THREE.Mesh(
-      new THREE.BoxGeometry(3.6, 2.4, chunkLen),
-      new THREE.MeshStandardMaterial({ color: 0x33455e, roughness: 0.9 })
-    );
-    lower.position.set(STANDS_X + 2.7, 1.85, z);
-    g.add(lower);
-    // Tier 2 (upper stand, offset back)
-    const upper = new THREE.Mesh(
-      new THREE.BoxGeometry(5.5, 5, chunkLen),
-      new THREE.MeshStandardMaterial({ color: 0x3b4e6c, roughness: 0.9 })
-    );
-    upper.position.set(STANDS_X + 7, 4, z);
-    g.add(upper);
-    // Color band along the top of upper stand (national-team colors rotating)
-    const bandColors = [0xa1102b, 0x0d4ea6, 0xffd400, 0x0a5b2c];
-    const railMat = new THREE.MeshStandardMaterial({ color: bandColors[i % bandColors.length], roughness: 0.6 });
-    const rail = new THREE.Mesh(new THREE.BoxGeometry(5.6, 0.4, chunkLen - 0.2), railMat);
-    rail.position.set(STANDS_X + 7, 6.7, z);
-    g.add(rail);
-    // (fans added via InstancedMesh below — see buildFanCrowds())
-    // Roof overhang every other chunk (heavy structural look)
-    if (i % 2 === 0) {
-      const roof = new THREE.Mesh(
-        new THREE.BoxGeometry(7, 0.25, chunkLen + 0.4),
-        new THREE.MeshStandardMaterial({ color: 0x1a2230, roughness: 0.7, metalness: 0.4 })
-      );
-      roof.position.set(STANDS_X + 6.5, 9.5, z);
-      g.add(roof);
-    }
-  }
-  return g;
-}
-scene.add(buildNearStands());
-
-function buildFarStands() {
-  // Stands ACROSS the pitch (far side, x ≪ PITCH_FAR_X)
-  const g = new THREE.Group();
-  const chunkLen = 20;
-  const chunks = Math.ceil(TRACK_LEN / chunkLen) + 2;
-  const baseX = PITCH_FAR_X - 4;
-  for (let i = 0; i < chunks; i++) {
-    const z = -i * chunkLen + 10;
-    // Ad board on field edge
-    const adColor = ['#d11', '#06c', '#0a4', '#fa0'][(i+1) % 4];
-    const ad = new THREE.Mesh(
-      new THREE.BoxGeometry(0.4, 0.7, chunkLen - 0.4),
-      new THREE.MeshStandardMaterial({ color: new THREE.Color(adColor), emissive: new THREE.Color(adColor), emissiveIntensity: 0.18, roughness: 0.4 })
-    );
-    ad.position.set(PITCH_FAR_X - 0.2, 0.35, z);
-    g.add(ad);
-    // Lower stand
-    const lower = new THREE.Mesh(
-      new THREE.BoxGeometry(5, 3, chunkLen),
-      new THREE.MeshStandardMaterial({ color: 0x2a3a4f, roughness: 0.9 })
-    );
-    lower.position.set(baseX, 1.5, z);
-    g.add(lower);
-    // Upper stand
-    const upper = new THREE.Mesh(
-      new THREE.BoxGeometry(8, 6, chunkLen),
-      new THREE.MeshStandardMaterial({ color: 0x33455e, roughness: 0.9 })
-    );
-    upper.position.set(baseX - 5, 5, z);
-    g.add(upper);
-    // Roof
-    const roof = new THREE.Mesh(
-      new THREE.BoxGeometry(10, 0.3, chunkLen + 0.5),
-      new THREE.MeshStandardMaterial({ color: 0x1a2230, roughness: 0.7, metalness: 0.4 })
-    );
-    roof.position.set(baseX - 5, 11, z);
-    g.add(roof);
-    // (fans added via InstancedMesh below — see buildFanCrowds())
-  }
-  // Back-curve stands (behind the goal at the far Z end)
-  for (let i = 0; i < 12; i++) {
-    const xa = -25 + i * 4;
-    const back = new THREE.Mesh(
-      new THREE.BoxGeometry(4, 6, 6),
-      new THREE.MeshStandardMaterial({ color: 0x2c3d52, roughness: 0.9 })
-    );
-    back.position.set(xa, 3, -TRACK_LEN + 5);
-    g.add(back);
-  }
-  return g;
-}
-scene.add(buildFarStands());
-
-// ----- End-cap stands (behind each goal — closes off the stadium bowl) -----
-function buildEndStand(atZ, facingDir) {
-  // atZ: world Z position; facingDir: +1 or -1 (which way the seating steps)
-  const g = new THREE.Group();
-  const spanW = 72; // x width to span both near + far stands + pitch
-  const centerX = PITCH_CENTER_X - 5;
-  for (let tier = 0; tier < 6; tier++) {
-    const tierW = spanW - tier * 1.5;
-    const depth = 4 + tier * 0.6;
-    const stepZ = atZ + facingDir * (3 + tier * depth * 0.55);
-    // Seating block
-    const block = new THREE.Mesh(
-      new THREE.BoxGeometry(tierW, 3.6 + tier * 0.3, depth),
-      new THREE.MeshStandardMaterial({ color: 0x2a3a52, roughness: 0.9 })
-    );
-    block.position.set(centerX, 2.2 + tier * 3.8, stepZ);
-    g.add(block);
-    // Crowd color band on each tier
-    const bandColors = [0xa1102b, 0x0d4ea6, 0xffd400, 0x0a5b2c, 0xffffff, 0x6600cc];
-    const band = new THREE.Mesh(
-      new THREE.BoxGeometry(tierW - 0.3, 0.35, depth - 0.2),
-      new THREE.MeshBasicMaterial({ color: bandColors[(tier * 7 + Math.abs(atZ | 0)) % bandColors.length] })
-    );
-    band.position.set(centerX, 4.1 + tier * 3.8, stepZ);
-    g.add(band);
-    // (end-stand fans are added via buildFanCrowds() InstancedMesh)
-    // Roof overhang on top tier
-    if (tier === 5) {
-      const roofOvhg = new THREE.Mesh(
-        new THREE.BoxGeometry(tierW + 2, 0.28, depth + 3),
-        new THREE.MeshStandardMaterial({ color: 0x111825, roughness: 0.7, metalness: 0.5 })
-      );
-      roofOvhg.position.set(centerX, 4.5 + tier * 3.8 + 3.5, stepZ + facingDir * 1.5);
-      g.add(roofOvhg);
-    }
-  }
-  return g;
-}
-scene.add(buildEndStand(12, 1));                // near end (behind near goal)
-scene.add(buildEndStand(-TRACK_LEN + 8, -1));   // far end (behind far goal)
-
-// ----- Stadium roof/canopy — spans over both stands -----
 {
-  const roofW = 82;
-  const centerX = PITCH_CENTER_X - 5;
-  const roofLen = TRACK_LEN + 50;
-  const roofY = 23;
-  // Main canopy (dark steel panel)
-  const canopy = new THREE.Mesh(
-    new THREE.BoxGeometry(roofW, 0.5, roofLen),
-    new THREE.MeshStandardMaterial({ color: 0x0e1520, roughness: 0.7, metalness: 0.55 })
+  // Compute average segment arc width at the outer edge
+  const sampleSegW = Math.hypot(
+    STAD_RX_OUTER * (Math.cos(2 * Math.PI / SEGS) - 1),
+    STAD_RZ_OUTER * (Math.sin(2 * Math.PI / SEGS) - 0)
   );
-  canopy.position.set(centerX, roofY, -TRACK_LEN / 2 + 10);
-  scene.add(canopy);
-  // Roof support trusses every 20 units
-  for (let z = 10; z >= -TRACK_LEN + 10; z -= 20) {
-    const truss = new THREE.Mesh(
-      new THREE.BoxGeometry(roofW + 2, 0.6, 0.8),
-      new THREE.MeshStandardMaterial({ color: 0x1e2e42, roughness: 0.6, metalness: 0.7 })
-    );
-    truss.position.set(centerX, roofY + 0.2, z);
-    scene.add(truss);
-    // Vertical support columns at each side of truss
-    for (const sx of [centerX - roofW / 2 + 1, centerX + roofW / 2 - 1]) {
-      const col = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.28, 0.28, roofY - 11, 6),
-        new THREE.MeshStandardMaterial({ color: 0x2a3a50, roughness: 0.5, metalness: 0.6 })
+  const concreteMat = new THREE.MeshStandardMaterial({ color: 0xbeb9ad, roughness: 0.95 });
+  const adMat       = new THREE.MeshStandardMaterial({ vertexColors: false, roughness: 0.5 });
+  const bandMat     = new THREE.MeshStandardMaterial({ vertexColors: false, roughness: 0.6 });
+
+  // Shared geometries — width is along Z (tangent direction once yaw is applied)
+  const wallGeo = new THREE.BoxGeometry(0.3,         1.0,          sampleSegW * 1.02);
+  const adGeo   = new THREE.BoxGeometry(0.18,        0.65,         sampleSegW * 0.94);
+  const slabGeo = new THREE.BoxGeometry(TIER_DEPTH,  TIER_STEP_Y,  sampleSegW * 1.02);
+  const bandGeo = new THREE.BoxGeometry(0.06,        0.32,         sampleSegW * 0.92);
+
+  const wallMesh = new THREE.InstancedMesh(wallGeo, concreteMat, SEGS);
+  const adMesh   = new THREE.InstancedMesh(adGeo,   adMat,       SEGS);
+  const slabMesh = new THREE.InstancedMesh(slabGeo, concreteMat, SEGS * TIERS);
+  const bandMesh = new THREE.InstancedMesh(bandGeo, bandMat,     SEGS * TIERS);
+  // No shadows on stadium structure — keep shadow pass cheap
+
+  const dummy = new THREE.Object3D();
+  const col = new THREE.Color();
+  const adColors = [0xd11111, 0x0066cc, 0x008844, 0xffaa00, 0xaa1100, 0xff8800];
+
+  for (let i = 0; i < SEGS; i++) {
+    const tm = ((i + 0.5) / SEGS) * 2 * Math.PI;
+    const baseX = STAD_RX_OUTER * Math.cos(tm);
+    const baseZ = STAD_RZ_OUTER * Math.sin(tm);
+    const tx = -STAD_RX_OUTER * Math.sin(tm);
+    const tz =  STAD_RZ_OUTER * Math.cos(tm);
+    const tlen = Math.hypot(tx, tz);
+    const onx = tz / tlen, onz = -tx / tlen;
+    const yaw = Math.atan2(tx / tlen, tz / tlen);
+    // Wall
+    dummy.position.set(baseX + 0.15 * onx, 0.5, baseZ + 0.15 * onz);
+    dummy.rotation.set(0, yaw, 0);
+    dummy.updateMatrix(); wallMesh.setMatrixAt(i, dummy.matrix);
+    // Ad board
+    dummy.position.set(baseX + 0.02 * onx, 0.4, baseZ + 0.02 * onz);
+    dummy.updateMatrix(); adMesh.setMatrixAt(i, dummy.matrix);
+    col.setHex(adColors[i % adColors.length]);
+    adMesh.setColorAt(i, col);
+    // Tiers
+    for (let tier = 0; tier < TIERS; tier++) {
+      const tx0 = (tier + 0.5) * TIER_STEP_R + 0.5;
+      const ty0 = 0.5 + tier * TIER_STEP_Y + TIER_STEP_Y / 2;
+      const idx = tier * SEGS + i;
+      // Slab
+      dummy.position.set(baseX + tx0 * onx, ty0, baseZ + tx0 * onz);
+      dummy.rotation.set(0, yaw, 0);
+      dummy.updateMatrix(); slabMesh.setMatrixAt(idx, dummy.matrix);
+      // Band
+      dummy.position.set(
+        baseX + (tx0 - TIER_DEPTH / 2) * onx,
+        ty0 + TIER_STEP_Y / 2 - 0.16,
+        baseZ + (tx0 - TIER_DEPTH / 2) * onz
       );
-      col.position.set(sx, 11 + (roofY - 11) / 2, z);
-      scene.add(col);
+      dummy.updateMatrix(); bandMesh.setMatrixAt(idx, dummy.matrix);
+      col.setHex(SEG_BAND_COLORS[(i + tier) % SEG_BAND_COLORS.length]);
+      bandMesh.setColorAt(idx, col);
     }
   }
-  // Inner canopy lip (bright steel edge — catches the floodlights)
-  const lip = new THREE.Mesh(
-    new THREE.BoxGeometry(roofW + 0.5, 0.15, roofLen + 0.5),
-    new THREE.MeshStandardMaterial({ color: 0x3a5272, roughness: 0.4, metalness: 0.8 })
-  );
-  lip.position.set(centerX, roofY - 0.4, -TRACK_LEN / 2 + 10);
-  scene.add(lip);
+  wallMesh.instanceMatrix.needsUpdate = true;
+  adMesh.instanceMatrix.needsUpdate = true;
+  slabMesh.instanceMatrix.needsUpdate = true;
+  bandMesh.instanceMatrix.needsUpdate = true;
+  if (adMesh.instanceColor)   adMesh.instanceColor.needsUpdate = true;
+  if (bandMesh.instanceColor) bandMesh.instanceColor.needsUpdate = true;
+  scene.add(wallMesh, adMesh, slabMesh, bandMesh);
 }
 
-// ----- Fan crowd via InstancedMesh (one draw call per geometry type) -----
+// =====================================================
+// OVAL FAN CROWD (InstancedMesh - one per stand tier)
+// =====================================================
 {
-  const JP = [0xa1102b,0x0d4ea6,0xffd400,0x0a5b2c,0xcc2200,0x003399,0xff6600,0xffffff,0x660099,0xff3366,0x009900,0xff9900,0x006666,0x884400];
-  const SP = [0xf5c8a0, 0xd4956a, 0x8b5e3c, 0xfdd5b0, 0xc68642];
+  const JP = [
+    0xa1102b, 0x0d4ea6, 0xffd400, 0x0a5b2c, 0xcc2200, 0x003399,
+    0xff6600, 0xffffff, 0x660099, 0xff3366, 0x009900, 0xff9900,
+    0x006666, 0x884400, 0xeeeeee, 0x222244, 0x880022, 0xaaaaaa,
+  ];
+  const SP = [0xf3c8a0, 0xd49560, 0xa17048, 0x8b5e3c, 0xfdd5b0, 0xc68642, 0xebc395, 0x6b4423];
+  const HP = [0x111111, 0x2b1b10, 0x553311, 0x884422, 0xc89952, 0xeed5a0, 0x222222];
   const rnd = () => Math.random();
-  const rndJersey = () => JP[Math.floor(rnd() * JP.length)];
-  const rndSkin   = () => SP[Math.floor(rnd() * SP.length)];
+  const pick = arr => arr[Math.floor(rnd() * arr.length)];
 
-  const bodyGeo = new THREE.BoxGeometry(0.26, 0.34, 0.20);
-  const headGeo = new THREE.SphereGeometry(0.11, 5, 3);
+  const bodyGeo = new THREE.BoxGeometry(0.50, 0.55, 0.32);
+  const headGeo = new THREE.SphereGeometry(0.18, 5, 4);
+  const hairGeo = new THREE.SphereGeometry(0.19, 5, 4, 0, Math.PI * 2, 0, Math.PI / 2);
 
-  function spawnFanCrowd(positions, colors, geo) {
+  const allBPos = [], allBCol = [];
+  const allHPos = [], allHCol = [];
+  const allAirPos = [], allAirCol = [];
+
+  // Place fans on each tier of the oval stand
+  const FAN_SPC_ARC = 2.0; // wider spacing → far fewer fans (perf)
+  for (let tier = 0; tier < TIERS; tier++) {
+    // Radial offset for this tier (sit slightly behind the tier riser)
+    const tierR = (tier + 0.5) * TIER_STEP_R + 0.5 - TIER_DEPTH / 2 + 0.6;
+    const tierY = 0.5 + tier * TIER_STEP_Y + TIER_STEP_Y;
+    // Walk around the oval at this tier's radius
+    const TR_RX = STAD_RX_OUTER + tierR;
+    const TR_RZ = STAD_RZ_OUTER + tierR;
+    const tierCirc = Math.PI * (3 * (TR_RX + TR_RZ) - Math.sqrt((3 * TR_RX + TR_RZ) * (TR_RX + 3 * TR_RZ)));
+    const fanCount = Math.floor(tierCirc / FAN_SPC_ARC);
+    for (let fi = 0; fi < fanCount; fi++) {
+      const t = (fi / fanCount) * 2 * Math.PI;
+      const ct = Math.cos(t), st = Math.sin(t);
+      const fx = TR_RX * ct + (rnd() - 0.5) * 0.06;
+      const fz = TR_RZ * st + (rnd() - 0.5) * 0.06;
+      // Yaw to face inward (toward pitch center)
+      const tx = -TR_RX * st;
+      const tz =  TR_RZ * ct;
+      const tlen = Math.hypot(tx, tz);
+      const yaw = Math.atan2(tx / tlen, tz / tlen) + Math.PI; // face inward
+      const jitter = (rnd() - 0.5) * 0.25;
+      const yRot = yaw + jitter;
+      allBPos.push([fx, tierY, fz, yRot]); allBCol.push(pick(JP));
+      allHPos.push([fx, tierY + 0.45, fz, yRot]); allHCol.push(pick(SP));
+      allAirPos.push([fx, tierY + 0.55, fz, yRot]); allAirCol.push(pick(HP));
+    }
+  }
+
+  function spawnInstanced(positions, colors, geo) {
     const n = positions.length;
     if (!n) return;
-    const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial(), n);
+    const mesh = new THREE.InstancedMesh(geo, new THREE.MeshLambertMaterial(), n);
     const dummy = new THREE.Object3D();
     const col = new THREE.Color();
     for (let i = 0; i < n; i++) {
       const p = positions[i];
       dummy.position.set(p[0], p[1], p[2]);
+      dummy.rotation.set(0, p[3], 0);
       dummy.updateMatrix();
       mesh.setMatrixAt(i, dummy.matrix);
       col.setHex(colors[i]);
@@ -1037,219 +992,177 @@ scene.add(buildEndStand(-TRACK_LEN + 8, -1));   // far end (behind far goal)
     if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     scene.add(mesh);
   }
-
-  // ---- Near stands (right side of track) ----
-  {
-    const nBPos = [], nBCol = [], nHPos = [], nHCol = [];
-    const CL = 16, CHUNKS = Math.ceil(TRACK_LEN / CL) + 2, ROWS = 7, SPC = 0.58;
-    for (let i = 0; i < CHUNKS; i++) {
-      const z = -i * CL + 10;
-      for (let r = 0; r < ROWS; r++) {
-        const fx = STANDS_X + 4.2 + r * 0.55;
-        const fy = 2.45 + r * 0.55;
-        const cnt = Math.round(CL / SPC);
-        for (let fi = 0; fi < cnt; fi++) {
-          const fz = z - CL / 2 + fi * SPC + SPC / 2;
-          nBPos.push([fx, fy,       fz]); nBCol.push(rndJersey());
-          nHPos.push([fx, fy + 0.25, fz]); nHCol.push(rndSkin());
-        }
-      }
-    }
-    spawnFanCrowd(nBPos, nBCol, bodyGeo);
-    spawnFanCrowd(nHPos, nHCol, headGeo);
-  }
-
-  // ---- Far stands (left side of pitch) ----
-  {
-    const fBPos = [], fBCol = [], fHPos = [], fHCol = [];
-    const CL = 20, CHUNKS = Math.ceil(TRACK_LEN / CL) + 2, ROWS = 10, SPC = 0.64;
-    const bX = PITCH_FAR_X - 4;
-    for (let i = 0; i < CHUNKS; i++) {
-      const z = -i * CL + 10;
-      for (let r = 0; r < ROWS; r++) {
-        const fx = bX + 1.5 - r * 0.7;
-        const fy = 1.65 + r * 0.65;
-        const cnt = Math.round(CL / SPC);
-        for (let fi = 0; fi < cnt; fi++) {
-          const fz = z - CL / 2 + fi * SPC + SPC / 2;
-          fBPos.push([fx, fy,       fz]); fBCol.push(rndJersey());
-          fHPos.push([fx, fy + 0.25, fz]); fHCol.push(rndSkin());
-        }
-      }
-    }
-    spawnFanCrowd(fBPos, fBCol, bodyGeo);
-    spawnFanCrowd(fHPos, fHCol, headGeo);
-  }
-
-  // ---- End stands (near + far goal ends) ----
-  {
-    const eBPos = [], eBCol = [], eHPos = [], eHCol = [];
-    const CX = PITCH_CENTER_X - 5;
-    const SPC = 0.6;
-    const endStandConfigs = [
-      { atZ: 12,            dir: 1  },
-      { atZ: -TRACK_LEN + 8, dir: -1 },
-    ];
-    for (const { atZ, dir } of endStandConfigs) {
-      for (let tier = 0; tier < 6; tier++) {
-        const tierW = 72 - tier * 1.5;
-        const depth = 4 + tier * 0.6;
-        const stepZ = atZ + dir * (3 + tier * depth * 0.55);
-        const fy = 4.35 + tier * 3.8;
-        const cnt = Math.floor(tierW / SPC);
-        for (let fi = 0; fi < cnt; fi++) {
-          const fx = CX - tierW / 2 + fi * SPC + SPC / 2;
-          eBPos.push([fx, fy,       stepZ]); eBCol.push(rndJersey());
-          eHPos.push([fx, fy + 0.26, stepZ]); eHCol.push(rndSkin());
-        }
-      }
-    }
-    spawnFanCrowd(eBPos, eBCol, bodyGeo);
-    spawnFanCrowd(eHPos, eHCol, headGeo);
-  }
+  spawnInstanced(allBPos, allBCol, bodyGeo);
+  spawnInstanced(allHPos, allHCol, headGeo);
+  spawnInstanced(allAirPos, allAirCol, hairGeo);
 }
 
-// ----- Jumbotron above the far back stand -----
+// =====================================================
+// STADIUM ROOF (oval canopy ring) — InstancedMesh
+// =====================================================
 {
+  const ROOF_Y = 0.5 + TIERS * TIER_STEP_Y + 2;
+  const ROOF_R_X = (STAD_RX_OUTER + STAD_RX_ROOF) / 2;
+  const ROOF_R_Z = (STAD_RZ_OUTER + STAD_RZ_ROOF) / 2;
+  const ROOF_DEPTH = STAD_RX_ROOF - STAD_RX_OUTER;
+  const sampleSegW = Math.hypot(
+    ROOF_R_X * (Math.cos(2 * Math.PI / SEGS) - 1),
+    ROOF_R_Z * (Math.sin(2 * Math.PI / SEGS) - 0)
+  );
+  const canopyMat = new THREE.MeshStandardMaterial({ color: 0x6e6862, roughness: 0.55, metalness: 0.6 });
+  const trussMat  = new THREE.MeshStandardMaterial({ color: 0x807a72, roughness: 0.45, metalness: 0.7 });
+  const canopyGeo = new THREE.BoxGeometry(ROOF_DEPTH, 0.4, sampleSegW * 1.02);
+  const canopyMesh = new THREE.InstancedMesh(canopyGeo, canopyMat, SEGS);
+  const dummy = new THREE.Object3D();
+  const columnCount = Math.ceil(SEGS / 4);
+  const colGeo = new THREE.CylinderGeometry(0.32, 0.32, ROOF_Y - 0.5, 6);
+  const colMesh = new THREE.InstancedMesh(colGeo, trussMat, columnCount);
+  let colIdx = 0;
+  for (let i = 0; i < SEGS; i++) {
+    const tm = ((i + 0.5) / SEGS) * 2 * Math.PI;
+    const bx = ROOF_R_X * Math.cos(tm);
+    const bz = ROOF_R_Z * Math.sin(tm);
+    const tx = -ROOF_R_X * Math.sin(tm);
+    const tz =  ROOF_R_Z * Math.cos(tm);
+    const tlen = Math.hypot(tx, tz);
+    const yaw = Math.atan2(tx / tlen, tz / tlen);
+    dummy.position.set(bx, ROOF_Y, bz);
+    dummy.rotation.set(0, yaw, 0);
+    dummy.updateMatrix();
+    canopyMesh.setMatrixAt(i, dummy.matrix);
+    if (i % 4 === 0 && colIdx < columnCount) {
+      const onx = tz / tlen, onz = -tx / tlen;
+      dummy.position.set(bx - ROOF_DEPTH * 0.3 * onx, 0.5 + (ROOF_Y - 0.5) / 2, bz - ROOF_DEPTH * 0.3 * onz);
+      dummy.rotation.set(0, 0, 0);
+      dummy.updateMatrix();
+      colMesh.setMatrixAt(colIdx++, dummy.matrix);
+    }
+  }
+  canopyMesh.instanceMatrix.needsUpdate = true;
+  colMesh.instanceMatrix.needsUpdate = true;
+  scene.add(canopyMesh, colMesh);
+}
+
+// =====================================================
+// FLOODLIGHT PYLONS (4 around the oval)
+// =====================================================
+for (let i = 0; i < 4; i++) {
+  const theta = (i + 0.5) * Math.PI / 2; // at 45°, 135°, 225°, 315°
+  const px = (STAD_RX_ROOF + 4) * Math.cos(theta);
+  const pz = (STAD_RZ_ROOF + 4) * Math.sin(theta);
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.25, 0.3, 30, 8),
+    new THREE.MeshStandardMaterial({ color: 0x6a6a6a, roughness: 0.5, metalness: 0.6 })
+  );
+  pole.position.set(px, 15, pz);
+  scene.add(pole);
+  const lamp = new THREE.Mesh(
+    new THREE.BoxGeometry(2.6, 0.9, 1.5),
+    new THREE.MeshBasicMaterial({ color: 0xfff7d0 })
+  );
+  lamp.position.set(px, 30, pz);
+  // tilt lamp toward stadium center
+  lamp.lookAt(0, 8, 0);
+  scene.add(lamp);
+}
+
+// =====================================================
+// JUMBOTRON (above one end stand)
+// =====================================================
+const jumboGroup = { screen: null };
+{
+  // Place at the +z "end" of the oval (north end)
+  const JX = 0;
+  const JZ = STAD_RZ_OUTER + 4;
+  const JY = 16;
   const jumbo = new THREE.Mesh(
-    new THREE.BoxGeometry(13, 6, 0.6),
+    new THREE.BoxGeometry(14, 6.5, 0.6),
     new THREE.MeshStandardMaterial({ color: 0x0b1018, roughness: 0.6 })
   );
-  jumbo.position.set(PITCH_CENTER_X, 12, -TRACK_LEN + 7);
+  jumbo.position.set(JX, JY, JZ);
+  jumbo.rotation.y = Math.PI; // face toward pitch
   scene.add(jumbo);
   const screenCanvas = document.createElement('canvas');
   screenCanvas.width = 512; screenCanvas.height = 240;
   const screenTex = new THREE.CanvasTexture(screenCanvas);
   const screen = new THREE.Mesh(
-    new THREE.PlaneGeometry(12, 5),
+    new THREE.PlaneGeometry(13, 5.5),
     new THREE.MeshBasicMaterial({ map: screenTex })
   );
-  screen.position.set(PITCH_CENTER_X, 12, -TRACK_LEN + 7.35);
+  screen.position.set(JX, JY, JZ - 0.35);
+  screen.rotation.y = Math.PI;
   scene.add(screen);
   jumboGroup.screen = { canvas: screenCanvas, tex: screenTex };
 }
 
-// ----- Floodlight pylons (4 corners) -----
-for (const x of [STANDS_X + 12, PITCH_FAR_X - 10]) {
-  for (const z of [-10, -TRACK_LEN + 25]) {
-    const pole = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.2, 0.2, 26, 8),
-      new THREE.MeshStandardMaterial({ color: 0x6a6a6a, roughness: 0.5, metalness: 0.6 })
-    );
-    pole.position.set(x, 13, z);
-    scene.add(pole);
-    const lamp = new THREE.Mesh(
-      new THREE.BoxGeometry(2.4, 0.8, 1.4),
-      new THREE.MeshBasicMaterial({ color: 0xfff7d0 })
-    );
-    lamp.position.set(x, 26, z);
-    scene.add(lamp);
-  }
-}
-
-// =====================================================
 // ACTIVE MATCH ON THE PITCH (animated rival players + ball)
 // =====================================================
 const matchActors = new THREE.Group();
 scene.add(matchActors);
 
-function spawnMatchActor(z) {
-  const teamColor = Math.random() < 0.5 ? 0x6cb4e4 : 0xff4d4d;
-  const a = buildRunner({ palette: {
-    top: teamColor, shorts: 0xffffff, boots: 0x111111,
-    skin: 0xd8a98a, hair: 0x111111,
-  }});
-  a.scale.set(0.88, 0.88, 0.88);
-  const x = PITCH_INNER_X - 4 - Math.random() * (PITCH_WIDTH - 8);
-  a.position.set(x, 0, z);
-  a.rotation.y = Math.random() * Math.PI * 2;
-  a.userData.phase = Math.random() * Math.PI * 2;
-  a.userData.speed = 5 + Math.random() * 5;
-  a.userData.driftDir = (Math.random() - 0.5) * 0.6;
-  matchActors.add(a);
+function spawnMatchActor() {
+  // Used to spawn extra actors during play — not used in oval layout but kept for safety
 }
 
-// Pre-populate the pitch in 4-3-3 formation (both teams)
-// Pitch: x from PITCH_FAR_X(-63.6) to PITCH_INNER_X(-3.6); z from -220 to 5
-// Team A (blue) — defend far goal (z ≈ -220), attack toward near goal
-// Team B (red)  — defend near goal (z ≈ 5), attack toward far goal
+// 11v11 formation across the rectangular pitch (centered at origin)
+// Pitch: x ∈ [-PITCH_W/2, +PITCH_W/2], z ∈ [-PITCH_L/2, +PITCH_L/2]
+// Team A (blue) defends -z end. Team B (red) defends +z end.
 {
-  const HZ = HALFWAY_Z; // -110
-  const NEAR_Z = 2;
-  const FAR_Z = -TRACK_LEN + 18;
-  const LC = PITCH_FAR_X + 6;    // left channel x
-  const MC = PITCH_CENTER_X;     // centre x
-  const RC = PITCH_INNER_X - 6;  // right channel x
-  const ML = PITCH_FAR_X + 16;
-  const MR = PITCH_INNER_X - 16;
-
-  // ---- Team A: blue (defending far end) ----
-  const teamAFormation = [
-    // GK
-    { x: MC, z: FAR_Z + 4 },
-    // Defenders
-    { x: LC, z: FAR_Z + 18 }, { x: ML, z: FAR_Z + 18 },
-    { x: MR, z: FAR_Z + 18 }, { x: RC, z: FAR_Z + 18 },
-    // Midfielders
-    { x: LC + 4, z: HZ - 25 }, { x: MC, z: HZ - 25 }, { x: RC - 4, z: HZ - 25 },
-    // Forwards
-    { x: LC + 6, z: HZ - 8 }, { x: MC, z: HZ - 4 }, { x: RC - 6, z: HZ - 8 },
+  const PW = PITCH_W, PL = PITCH_L;
+  // ---- Team A: blue (defending -z goal) ----
+  const teamA = [
+    { x: 0,         z: -PL/2 + 4 },   // GK
+    { x: -PW/2 + 6, z: -PL/2 + 18 }, { x: -PW/2 + 18, z: -PL/2 + 16 },
+    { x:  PW/2 - 18, z: -PL/2 + 16 }, { x:  PW/2 - 6, z: -PL/2 + 18 },  // defenders
+    { x: -PW/2 + 12, z: -10 }, { x: 0, z: -8 }, { x: PW/2 - 12, z: -10 }, // mids
+    { x: -PW/2 + 16, z:  4 }, { x: 0, z:  2 }, { x: PW/2 - 16, z: 4 },   // forwards
   ];
-  for (const p of teamAFormation) {
-    const a = buildRunner({ palette: { top: 0x2080e8, shorts: 0x0a4090, boots: 0x222, skin: 0xd8a98a, hair: 0x111 } });
-    a.scale.set(0.88, 0.88, 0.88);
+  for (const p of teamA) {
+    const a = buildSimpleActor({ top: 0x2080e8, shorts: 0x0a4090, skin: 0xd8a98a, hair: 0x111 });
+    a.scale.set(0.92, 0.92, 0.92);
     a.position.set(p.x, 0, p.z);
-    a.rotation.y = Math.PI * 0.05; // roughly facing play
+    a.rotation.y = Math.PI; // face +z (toward opponent goal)
     a.userData.phase = Math.random() * Math.PI * 2;
-    a.userData.speed = 4 + Math.random() * 4;
-    a.userData.driftDir = (Math.random() - 0.5) * 0.3;
+    a.userData.speed = 4 + Math.random() * 3;
     matchActors.add(a);
   }
-
-  // ---- Team B: red (defending near end) ----
-  const teamBFormation = [
-    // GK
-    { x: MC, z: NEAR_Z - 5 },
-    // Defenders
-    { x: LC, z: NEAR_Z - 18 }, { x: ML, z: NEAR_Z - 18 },
-    { x: MR, z: NEAR_Z - 18 }, { x: RC, z: NEAR_Z - 18 },
-    // Midfielders
-    { x: LC + 4, z: HZ + 25 }, { x: MC, z: HZ + 25 }, { x: RC - 4, z: HZ + 25 },
-    // Forwards
-    { x: LC + 6, z: HZ + 8 }, { x: MC, z: HZ + 4 }, { x: RC - 6, z: HZ + 8 },
+  // ---- Team B: red (defending +z goal) ----
+  const teamB = [
+    { x: 0,         z: PL/2 - 4 },
+    { x: -PW/2 + 6, z: PL/2 - 18 }, { x: -PW/2 + 18, z: PL/2 - 16 },
+    { x:  PW/2 - 18, z: PL/2 - 16 }, { x:  PW/2 - 6, z: PL/2 - 18 },
+    { x: -PW/2 + 12, z: 10 }, { x: 0, z: 8 }, { x: PW/2 - 12, z: 10 },
+    { x: -PW/2 + 16, z: -4 }, { x: 0, z: -2 }, { x: PW/2 - 16, z: -4 },
   ];
-  for (const p of teamBFormation) {
-    const a = buildRunner({ palette: { top: 0xee2222, shorts: 0x880808, boots: 0x222, skin: 0xd8a98a, hair: 0x111 } });
-    a.scale.set(0.88, 0.88, 0.88);
+  for (const p of teamB) {
+    const a = buildSimpleActor({ top: 0xee2222, shorts: 0x880808, skin: 0xd8a98a, hair: 0x111 });
+    a.scale.set(0.92, 0.92, 0.92);
     a.position.set(p.x, 0, p.z);
-    a.rotation.y = Math.PI;
+    a.rotation.y = 0; // face -z (toward opponent goal)
     a.userData.phase = Math.random() * Math.PI * 2;
-    a.userData.speed = 4 + Math.random() * 4;
-    a.userData.driftDir = (Math.random() - 0.5) * 0.3;
+    a.userData.speed = 4 + Math.random() * 3;
     matchActors.add(a);
   }
 }
 
-// ----- Coaches on the sideline (near the touchline, around halfway line) -----
+// ----- Coaches at the touchline (technical area, halfway-line side) -----
 const coaches = [];
 {
+  // Place 4 coaches just outside one long-side touchline (between pitch and track)
+  const tx = PITCH_W / 2 + 0.8; // just outside the east touchline
   const coachData = [
-    // Near side (between track and pitch)
-    { x: PITCH_INNER_X - 1.8, z: HALFWAY_Z + 8,  ry: Math.PI / 2 },
-    { x: PITCH_INNER_X - 1.8, z: HALFWAY_Z + 2,  ry: Math.PI / 2 },
-    { x: PITCH_INNER_X - 1.8, z: HALFWAY_Z - 5,  ry: Math.PI / 2 },
-    { x: PITCH_INNER_X - 1.8, z: HALFWAY_Z - 12, ry: Math.PI / 2 },
+    { x: tx, z:  6, ry: -Math.PI / 2 },
+    { x: tx, z:  2, ry: -Math.PI / 2 },
+    { x: tx, z: -2, ry: -Math.PI / 2 },
+    { x: tx, z: -6, ry: -Math.PI / 2 },
   ];
   for (const d of coachData) {
-    const rig = buildRunner({ palette: { top: 0x1a1a6e, shorts: 0x111133, boots: 0x222244, skin: 0xddb39a, hair: 0x333 } });
-    rig.scale.set(0.88, 0.88, 0.88);
+    const rig = buildSimpleActor({ top: 0x1a1a6e, shorts: 0x111133, skin: 0xddb39a, hair: 0x333 });
+    rig.scale.set(0.95, 0.95, 0.95);
     rig.position.set(d.x, GROUND_Y, d.z);
     rig.rotation.y = d.ry;
-    // Crossed-arms pose
     rig.userData.armL.rotation.z =  0.7;
     rig.userData.armR.rotation.z = -0.7;
-    rig.userData.armL.rotation.x = -0.5;
-    rig.userData.armR.rotation.x = -0.5;
     scene.add(rig);
     coaches.push(rig);
   }
@@ -1275,8 +1188,56 @@ function updateJumbotron(coins, distance) {
 }
 
 // =====================================================
-// CHARACTER RIG (player & referee, same shape)
+// CHARACTER RIGS
 // =====================================================
+// Simple, low-poly rig for distant actors (match players, coaches).
+// Only 5 meshes vs. ~14 in the full buildRunner.
+function buildSimpleActor(palette = {}) {
+  const p = { skin: 0xd8a98a, hair: 0x111, top: 0xffffff, shorts: 0x111, boots: 0x111, ...palette };
+  const g = new THREE.Group();
+  const skinMat = new THREE.MeshLambertMaterial({ color: p.skin });
+  const hairMat = new THREE.MeshLambertMaterial({ color: p.hair });
+  const topMat  = new THREE.MeshLambertMaterial({ color: p.top });
+  const shortsMat = new THREE.MeshLambertMaterial({ color: p.shorts });
+
+  // Torso (capsule)
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.5, 3, 8), topMat);
+  torso.position.y = 1.4;
+  g.add(torso);
+  // Head
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 6), skinMat);
+  head.position.y = 2.05;
+  g.add(head);
+  // Hair (small cap)
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 6, 0, Math.PI * 2, 0, Math.PI / 1.9), hairMat);
+  hair.position.y = 2.07;
+  g.add(hair);
+  // Lower body (cylinder)
+  const legs = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.18, 0.9, 8), shortsMat);
+  legs.position.y = 0.45;
+  g.add(legs);
+
+  // Simple armswing: use 2 box arms grouped (still cheap)
+  const armGeo = new THREE.CylinderGeometry(0.08, 0.07, 0.6, 6);
+  const armL = new THREE.Mesh(armGeo, skinMat);
+  armL.position.set(-0.36, 1.4, 0); armL.rotation.z = 0.2;
+  g.add(armL);
+  const armR = new THREE.Mesh(armGeo, skinMat);
+  armR.position.set(0.36, 1.4, 0); armR.rotation.z = -0.2;
+  g.add(armR);
+
+  // Provide stub userData so existing animation code that touches legL/legR/armL/armR
+  // doesn't break — we just give them dummy groups whose rotation does nothing visible.
+  g.userData = {
+    armL, armR,
+    legL: new THREE.Group(), legR: new THREE.Group(),
+    bootL: new THREE.Group(), bootR: new THREE.Group(),
+    torso, head, hair, shorts: legs, neck: head,
+  };
+  return g;
+}
+
+// Full detailed rig (player & referee)
 function buildRunner(opts = {}) {
   const palette = {
     skin: 0xe6b89c, hair: 0x222,
@@ -1286,41 +1247,107 @@ function buildRunner(opts = {}) {
   };
   const g = new THREE.Group();
 
-  const skinMat = new THREE.MeshStandardMaterial({ color: palette.skin, roughness: 0.75 });
-  const hairMat = new THREE.MeshStandardMaterial({ color: palette.hair, roughness: 0.7 });
-  const topMat  = new THREE.MeshStandardMaterial({ color: palette.top, roughness: 0.65 });
-  const shortsMat = new THREE.MeshStandardMaterial({ color: palette.shorts, roughness: 0.7 });
-  const bootsMat  = new THREE.MeshStandardMaterial({ color: palette.boots, roughness: 0.5, metalness: 0.2, emissive: opts.glow ? palette.boots : 0x000, emissiveIntensity: opts.glow ? 0.5 : 0 });
+  const skinMat   = new THREE.MeshStandardMaterial({ color: palette.skin,   roughness: 0.85 });
+  const hairMat   = new THREE.MeshStandardMaterial({ color: palette.hair,   roughness: 0.65 });
+  const topMat    = new THREE.MeshStandardMaterial({ color: palette.top,    roughness: 0.55 });
+  const shortsMat = new THREE.MeshStandardMaterial({ color: palette.shorts, roughness: 0.65 });
+  const bootsMat  = new THREE.MeshStandardMaterial({ color: palette.boots,  roughness: 0.45, metalness: 0.25, emissive: opts.glow ? palette.boots : 0x000, emissiveIntensity: opts.glow ? 0.5 : 0 });
 
-  // Torso
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.9, 0.4), topMat);
-  torso.position.y = 1.4; torso.castShadow = true; g.add(torso);
-  // Head
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12), skinMat);
-  head.position.y = 2.05; head.castShadow = true; g.add(head);
-  // Hair cap
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.29, 16, 12, 0, Math.PI * 2, 0, Math.PI / 2.2), hairMat);
-  hair.position.y = 2.07; g.add(hair);
-  // Arms
-  const armGeo = new THREE.BoxGeometry(0.18, 0.7, 0.2);
-  armGeo.translate(0, -0.35, 0);
-  const armL = new THREE.Mesh(armGeo, skinMat); armL.position.set(-0.45, 1.75, 0); armL.castShadow = true; g.add(armL);
-  const armR = new THREE.Mesh(armGeo, skinMat); armR.position.set( 0.45, 1.75, 0); armR.castShadow = true; g.add(armR);
-  // Shorts
-  const shorts = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.4, 0.42), shortsMat);
-  shorts.position.y = 0.85; shorts.castShadow = true; g.add(shorts);
-  // Legs (parented at hip pivot)
-  const legGeo = new THREE.BoxGeometry(0.25, 0.7, 0.25);
-  legGeo.translate(0, -0.35, 0);
-  const legL = new THREE.Mesh(legGeo, skinMat); legL.position.set(-0.18, 0.65, 0); legL.castShadow = true; g.add(legL);
-  const legR = new THREE.Mesh(legGeo, skinMat); legR.position.set( 0.18, 0.65, 0); legR.castShadow = true; g.add(legR);
-  // Boots
-  const bootL = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.42), bootsMat);
-  bootL.position.set(-0.18, 0.1, 0.08); bootL.castShadow = true; g.add(bootL);
-  const bootR = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.18, 0.42), bootsMat);
-  bootR.position.set( 0.18, 0.1, 0.08); bootR.castShadow = true; g.add(bootR);
+  // ----- Torso: tapered capsule (chest > waist) -----
+  // CapsuleGeometry(radius, length, capSegs, radialSegs)
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.34, 0.50, 4, 10), topMat);
+  torso.position.y = 1.42; torso.castShadow = true;
+  g.add(torso);
 
-  g.userData = { armL, armR, legL, legR, bootL, bootR, torso, head, hair, shorts };
+  // Shoulders — bulge sphere on each side
+  const shoulderGeo = new THREE.SphereGeometry(0.18, 10, 8);
+  const shoulderL = new THREE.Mesh(shoulderGeo, topMat);
+  shoulderL.position.set(-0.36, 1.73, 0); shoulderL.castShadow = true; g.add(shoulderL);
+  const shoulderR = new THREE.Mesh(shoulderGeo, topMat);
+  shoulderR.position.set( 0.36, 1.73, 0); shoulderR.castShadow = true; g.add(shoulderR);
+
+  // ----- Neck -----
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.12, 0.16, 10), skinMat);
+  neck.position.y = 1.83; neck.castShadow = true; g.add(neck);
+
+  // ----- Head -----
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 14), skinMat);
+  head.position.y = 2.05; head.castShadow = true;
+  // Slight vertical squash for a more human shape
+  head.scale.set(1.0, 1.05, 1.0);
+  g.add(head);
+
+  // Hair cap — covers top of head, slightly raised in back
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.275, 16, 12, 0, Math.PI * 2, 0, Math.PI / 1.95), hairMat);
+  hair.position.y = 2.07; hair.castShadow = true; g.add(hair);
+
+  // Ears (small)
+  const earGeo = new THREE.SphereGeometry(0.045, 6, 5);
+  const earL = new THREE.Mesh(earGeo, skinMat); earL.position.set(-0.245, 2.04, 0.02); g.add(earL);
+  const earR = new THREE.Mesh(earGeo, skinMat); earR.position.set( 0.245, 2.04, 0.02); g.add(earR);
+
+  // ----- Arms: upper + forearm + hand -----
+  function makeArm(side) {
+    const arm = new THREE.Group();
+    arm.position.set(side * 0.40, 1.66, 0);
+    // pivot for swing
+    const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.075, 0.42, 8), skinMat);
+    upper.position.y = -0.21; upper.castShadow = true;
+    arm.add(upper);
+    const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.085, 8, 6), skinMat);
+    elbow.position.y = -0.42; arm.add(elbow);
+    const fore = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.065, 0.38, 8), skinMat);
+    fore.position.y = -0.62; fore.castShadow = true;
+    arm.add(fore);
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.085, 8, 6), skinMat);
+    hand.position.y = -0.82; hand.scale.set(1.0, 0.85, 1.2); arm.add(hand);
+    return arm;
+  }
+  const armL = makeArm(-1); g.add(armL);
+  const armR = makeArm( 1); g.add(armR);
+
+  // ----- Hips / shorts -----
+  const shorts = new THREE.Mesh(new THREE.CapsuleGeometry(0.30, 0.18, 4, 8), shortsMat);
+  shorts.position.y = 1.00; shorts.castShadow = true; g.add(shorts);
+
+  // ----- Legs: thigh + knee + calf + boot -----
+  function makeLeg(side) {
+    const leg = new THREE.Group();
+    leg.position.set(side * 0.16, 0.86, 0);
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.10, 0.42, 8), skinMat);
+    thigh.position.y = -0.21; thigh.castShadow = true;
+    leg.add(thigh);
+    const knee = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 6), skinMat);
+    knee.position.y = -0.42; leg.add(knee);
+    const calf = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.075, 0.42, 8), skinMat);
+    calf.position.y = -0.64; calf.castShadow = true;
+    leg.add(calf);
+    return leg;
+  }
+  const legL = makeLeg(-1); g.add(legL);
+  const legR = makeLeg( 1); g.add(legR);
+
+  // ----- Boots — soccer cleat shape (flatter, longer) -----
+  function makeBoot(side) {
+    const boot = new THREE.Group();
+    boot.position.set(side * 0.16, 0.08, 0.05);
+    const main = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.14, 0.46), bootsMat);
+    main.position.set(0, 0, 0); main.castShadow = true;
+    // round front of boot
+    main.geometry.translate(0, 0, 0);
+    boot.add(main);
+    const toe = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), bootsMat);
+    toe.position.set(0, -0.01, 0.21); toe.scale.set(0.9, 0.6, 1.0); boot.add(toe);
+    return boot;
+  }
+  const bootL = makeBoot(-1); g.add(bootL);
+  const bootR = makeBoot( 1); g.add(bootR);
+
+  g.userData = {
+    armL, armR, legL, legR, bootL, bootR,
+    torso, head, hair, shorts, neck,
+    shoulderL, shoulderR, earL, earR,
+  };
   return g;
 }
 
@@ -1329,34 +1356,59 @@ function applyCosmeticsTo(rig, profile) {
   const jerP  = catalogById(profile.selectedJersey)?.palette || {};
   const bootP = catalogById(profile.selectedBoots)?.palette || {};
   const ud = rig.userData;
+  // The new arm/leg groups have multiple child meshes — recolor all skin-mat children.
+  function recolorSkin(node, hex) {
+    node.traverse(o => {
+      if (o.material && o.material.color && o.material.roughness >= 0.8 && o.material.metalness === 0) {
+        // heuristic: skin material has high roughness, zero metalness
+        if (o !== ud.torso && o !== ud.shorts && o !== ud.bootL && o !== ud.bootR && o !== ud.hair) {
+          o.material.color.setHex(hex);
+        }
+      }
+    });
+  }
   if (charP.skin != null) {
     ud.head.material.color.setHex(charP.skin);
-    ud.armL.material.color.setHex(charP.skin);
-    ud.armR.material.color.setHex(charP.skin);
-    ud.legL.material.color.setHex(charP.skin);
-    ud.legR.material.color.setHex(charP.skin);
+    ud.neck.material.color.setHex(charP.skin);
+    recolorSkin(ud.armL, charP.skin);
+    recolorSkin(ud.armR, charP.skin);
+    recolorSkin(ud.legL, charP.skin);
+    recolorSkin(ud.legR, charP.skin);
+    if (ud.earL) ud.earL.material.color.setHex(charP.skin);
+    if (ud.earR) ud.earR.material.color.setHex(charP.skin);
   }
   if (charP.hair != null) ud.hair.material.color.setHex(charP.hair);
-  if (jerP.top != null) ud.torso.material.color.setHex(jerP.top);
+  if (jerP.top != null) {
+    ud.torso.material.color.setHex(jerP.top);
+    if (ud.shoulderL) ud.shoulderL.material.color.setHex(jerP.top);
+    if (ud.shoulderR) ud.shoulderR.material.color.setHex(jerP.top);
+  }
   if (jerP.shorts != null) ud.shorts.material.color.setHex(jerP.shorts);
   if (bootP.color != null) {
-    ud.bootL.material.color.setHex(bootP.color);
-    ud.bootR.material.color.setHex(bootP.color);
+    // boots are groups now
+    ud.bootL.traverse(o => { if (o.material && o.material.color) o.material.color.setHex(bootP.color); });
+    ud.bootR.traverse(o => { if (o.material && o.material.color) o.material.color.setHex(bootP.color); });
     const isGlow = profile.selectedBoots === 'gold-boots' || profile.selectedBoots === 'neon-boots' || profile.selectedBoots === 'ice-boots';
-    ud.bootL.material.emissive.setHex(isGlow ? bootP.color : 0x000000);
-    ud.bootL.material.emissiveIntensity = isGlow ? 0.6 : 0;
-    ud.bootR.material.emissive.setHex(isGlow ? bootP.color : 0x000000);
-    ud.bootR.material.emissiveIntensity = isGlow ? 0.6 : 0;
+    ud.bootL.traverse(o => { if (o.material && o.material.emissive) { o.material.emissive.setHex(isGlow ? bootP.color : 0x000000); o.material.emissiveIntensity = isGlow ? 0.6 : 0; } });
+    ud.bootR.traverse(o => { if (o.material && o.material.emissive) { o.material.emissive.setHex(isGlow ? bootP.color : 0x000000); o.material.emissiveIntensity = isGlow ? 0.6 : 0; } });
   }
 }
 
 const player = buildRunner({ palette: { top: 0xffffff, shorts: 0x111, boots: 0x111, skin: 0xe6b89c, hair: 0x2b1d12 } });
 applyCosmeticsTo(player, profile);
-player.position.set(0, GROUND_Y, 0);
+{
+  const wp = ovalAt(0, 0);
+  player.position.set(wp.x, GROUND_Y, wp.z);
+  player.rotation.y = wp.yaw;
+}
 scene.add(player);
 
 const referee = buildRunner({ palette: { top: 0x111111, shorts: 0x111111, boots: 0x222, skin: 0xddb39a, hair: 0xbbbbbb } });
-referee.position.set(0, GROUND_Y, 6);
+{
+  const wp = ovalAt(-6, 0);
+  referee.position.set(wp.x, GROUND_Y, wp.z);
+  referee.rotation.y = wp.yaw;
+}
 scene.add(referee);
 // Referee whistle (small white box)
 const whistle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.1), new THREE.MeshBasicMaterial({ color: 0xffffff }));
@@ -1453,8 +1505,10 @@ function makeObstacle(kind, lane, z) {
     height = DUGOUT_Y; mountable = true;
     mesh.userData.length = len;
   }
-  mesh.position.set(LANE_X[lane], 0, z);
-  mesh.userData = { ...mesh.userData, kind, lane, height, width, jumpable, slideable, mountable };
+  // Logical position: (lane, z). z is negative for ahead. Convert to arcPos.
+  const arcPos = S.distance + (-z); // ahead of player by |z| units
+  mesh.position.set(LANE_X[lane], 0, 0); // actual world position set each frame via ovalAt
+  mesh.userData = { ...mesh.userData, kind, lane, height, width, jumpable, slideable, mountable, arcPos, yBase: 0 };
   return mesh;
 }
 
@@ -1462,8 +1516,9 @@ function makeCoin(lane, z, y = 0.9) {
   const geo = new THREE.SphereGeometry(0.32, 16, 12);
   const mat = new THREE.MeshLambertMaterial({ color: 0xffd24a, emissive: 0xb27d09, emissiveIntensity: 0.4 });
   const coin = new THREE.Mesh(geo, mat);
-  coin.position.set(LANE_X[lane], y, z);
-  coin.userData = { lane, basY: y };
+  const arcPos = S.distance + (-z);
+  coin.position.set(LANE_X[lane], y, 0);
+  coin.userData = { lane, basY: y, arcPos, yBase: y };
   return coin;
 }
 
@@ -1611,11 +1666,11 @@ canvas.addEventListener('touchend', (e) => {
 // =====================================================
 function aabbHit(playerLane, playerY, playerHeight, ob) {
   if (ob.userData.lane !== playerLane) return false;
-  const dz = ob.position.z - 0; // player is at z=0
-  // Different obstacles have different z extents
+  // Use arc-length distance from player
+  const dArc = ob.userData.arcPos - S.distance;
   let zExt = 0.6;
   if (ob.userData.kind === 'dugout') zExt = (ob.userData.length || 6) / 2;
-  if (Math.abs(dz) > zExt + 0.4) return false;
+  if (Math.abs(dArc) > zExt + 0.4) return false;
   return checkHeightOverlap(playerY, playerHeight, ob);
 }
 function checkHeightOverlap(py, ph, ob) {
@@ -1647,11 +1702,18 @@ function update(dt) {
   spinCoins(dt);
 
   if (S.phase !== 'playing') {
-    // Idle camera drift for menu
+    // Idle camera: slowly drift around the oval at the player's start position
     if (S.phase === 'menu' || S.phase === 'paused') {
-      const t = performance.now() * 0.0003;
-      camera.position.x = Math.sin(t) * 0.6;
-      camera.lookAt(0, 1.5, 0);
+      const t = performance.now() * 0.00006;
+      const idleArc = (S.distance || 0) + t * 30;
+      const cw = ovalAt(idleArc - 7, 0);
+      camera.position.set(cw.x, 5.4, cw.z);
+      const lk = ovalAt(idleArc + 4, 0);
+      camera.lookAt(lk.x, 1.5, lk.z);
+      // Park the player on the oval too
+      const pw = ovalAt(idleArc, 0);
+      player.position.set(pw.x, GROUND_Y, pw.z);
+      player.rotation.y = pw.yaw;
       animatePlayerIdle();
     }
     return;
@@ -1664,22 +1726,6 @@ function update(dt) {
   // Move world: increment distance, scroll obstacles toward camera
   S.distance += S.speed * dt;
 
-  // --- Corner flash every ~350m (stadium lap feel) ---
-  {
-    const CORNER_EVERY = 350;
-    const cornerNum = Math.floor(S.distance / CORNER_EVERY);
-    if (cornerNum !== (S.lastCornerNum || 0)) {
-      S.lastCornerNum = cornerNum;
-      const cf = document.getElementById('cornerFlash');
-      const labels = ['🏟️ CORNER!', '🏃 STRAIGHT!', '🏟️ CORNER!', '🏃 STRAIGHT!'];
-      cf.textContent = labels[cornerNum % labels.length];
-      cf.classList.remove('on');
-      void cf.offsetWidth; // force reflow
-      cf.classList.add('on');
-      // Camera yaw wiggle for the corner — subtle lean
-      S.cameraShake = (S.cameraShake || 0) + 0.18;
-    }
-  }
 
   // Spawn rows
   S.spawnAccumulator += dt;
@@ -1689,19 +1735,16 @@ function update(dt) {
     spawnRow(FAR_Z, distNorm);
   }
 
-  // Move obstacles & coins forward (toward +z, which is toward camera)
-  const advance = S.speed * dt;
+  // Despawn obstacles/coins the player has passed (logical arc position behind player)
   for (let i = obstacleGroup.children.length - 1; i >= 0; i--) {
     const o = obstacleGroup.children[i];
-    o.position.z += advance;
-    if (o.position.z > DESPAWN_Z) {
+    if (S.distance - o.userData.arcPos > 5) {
       obstacleGroup.remove(o); o.traverse(disposeNode);
     }
   }
   for (let i = coinGroup.children.length - 1; i >= 0; i--) {
     const c = coinGroup.children[i];
-    c.position.z += advance;
-    if (c.position.z > DESPAWN_Z) {
+    if (S.distance - c.userData.arcPos > 5) {
       coinGroup.remove(c); c.geometry.dispose(); c.material.dispose();
     }
   }
@@ -1723,8 +1766,8 @@ function update(dt) {
   let topGroundY = 0;
   for (const o of obstacleGroup.children) {
     if (o.userData.kind === 'dugout' && o.userData.lane === S.lane) {
-      const dz = Math.abs(o.position.z - 0);
-      if (dz < (o.userData.length || 6) / 2) {
+      const dArc = Math.abs(o.userData.arcPos - S.distance);
+      if (dArc < (o.userData.length || 6) / 2) {
         topGroundY = DUGOUT_Y;
       }
     }
@@ -1738,13 +1781,27 @@ function update(dt) {
     S.y = topGroundY; S.vy = 0;
   }
 
-  // Apply player transform
-  player.position.set(S.laneX, S.y, 0);
+  // ===== Position EVERYTHING on the oval =====
+  // Player
+  const playerWp = ovalAt(S.distance, S.laneX);
+  player.position.set(playerWp.x, S.y, playerWp.z);
+  player.rotation.y = playerWp.yaw;
   if (S.sliding) {
     player.scale.set(1, 0.5, 1.2);
     player.position.y = S.y + 0.05;
   } else {
     player.scale.set(1, 1, 1);
+  }
+  // Obstacles
+  for (const o of obstacleGroup.children) {
+    const wp = ovalAt(o.userData.arcPos, o.userData.lane * LANE_W - 0);
+    o.position.set(wp.x, o.userData.yBase || 0, wp.z);
+    o.rotation.y = wp.yaw;
+  }
+  // Coins
+  for (const c of coinGroup.children) {
+    const wp = ovalAt(c.userData.arcPos, c.userData.lane * LANE_W);
+    c.position.set(wp.x, c.position.y || c.userData.yBase || 0.9, wp.z);
   }
 
   // Run animation
@@ -1760,12 +1817,12 @@ function update(dt) {
     player.userData.legR.rotation.x = 0.5;
   }
 
-  // Coin collection
+  // Coin collection (arc-based)
   const playerHeight = S.sliding ? 0.6 : 2.0;
   for (let i = coinGroup.children.length - 1; i >= 0; i--) {
     const c = coinGroup.children[i];
     if (c.userData.lane !== S.lane) continue;
-    if (Math.abs(c.position.z) > 0.7) continue;
+    if (Math.abs(c.userData.arcPos - S.distance) > 0.7) continue;
     const dy = Math.abs((S.y + playerHeight / 2) - c.position.y);
     if (dy < 1.0) {
       coinGroup.remove(c); c.geometry.dispose(); c.material.dispose();
@@ -1795,13 +1852,14 @@ function update(dt) {
     refreshHearts();
   }
   S.refZ += (S.refZTarget - S.refZ) * Math.min(1, dt * 1.2);
-  // refZ=1 means far behind: place at +6.5; refZ=0 means right on player: place at +1.5
-  const refPlaceZ = 1.5 + S.refZ * 6.5;
-  // Ref tracks the player's lane with a small lag — feels like being chased, not magnet-locked.
+  // refZ=1 means far behind on the oval; refZ=0 means right on the player's heels
+  const refArcBehind = 1.5 + S.refZ * 6.5;
+  // Ref tracks the player's lane with a small lag
   S.refX = (S.refX === undefined) ? S.laneX : S.refX;
   S.refX += (S.laneX - S.refX) * Math.min(1, dt * 6);
-  referee.position.set(S.refX, GROUND_Y, refPlaceZ);
-  referee.rotation.y = Math.sin(now * 0.005) * 0.05;
+  const refWp = ovalAt(S.distance - refArcBehind, S.refX);
+  referee.position.set(refWp.x, GROUND_Y, refWp.z);
+  referee.rotation.y = refWp.yaw;
   // Ref run anim
   const swing = Math.sin(now * 0.018) * 0.6;
   referee.userData.legL.rotation.x = swing;
@@ -1809,13 +1867,18 @@ function update(dt) {
   referee.userData.armL.rotation.x = -swing * 0.8;
   referee.userData.armR.rotation.x = swing * 0.8;
 
-  // Camera — placed slightly off-center to the right so the pitch (left) fills the frame.
-  // We bias the lookAt target leftward to keep the pitch & match in view.
-  const camTargetX = 0.8 + S.laneX * 0.45;
-  camera.position.x += (camTargetX - camera.position.x) * Math.min(1, dt * 4);
-  camera.position.y = 5.4 + Math.max(0, S.y) * 0.15 + S.cameraShake * Math.sin(now * 0.08);
+  // Camera — follow the player around the oval from behind
+  const camArcBehind = 7;
+  const camWp = ovalAt(S.distance - camArcBehind, S.laneX * 0.4);
+  camera.position.set(
+    camWp.x,
+    5.4 + Math.max(0, S.y) * 0.15 + S.cameraShake * Math.sin(now * 0.08),
+    camWp.z,
+  );
   S.cameraShake *= Math.pow(0.001, dt);
-  camera.lookAt(S.laneX * 0.3 - 1.2, 1.5 + Math.max(0, S.y) * 0.3, -4);
+  // Look slightly ahead of the player along the oval
+  const lookWp = ovalAt(S.distance + 5, S.laneX * 0.2);
+  camera.lookAt(lookWp.x, 1.5 + Math.max(0, S.y) * 0.3, lookWp.z);
 
   // HUD
   hudCoins.textContent = S.coinsRun.toString();
@@ -1828,22 +1891,13 @@ function update(dt) {
 }
 
 function animateScrollingPitch(dt) {
-  // pitch texture scroll
-  const scrollSpeed = S.phase === 'playing' ? S.speed : 4;
-  pitchTex.offset.y -= dt * scrollSpeed * 0.06;
-  animateMatchActors(dt, scrollSpeed);
-  animateMatchBall(dt, scrollSpeed);
+  // Pitch is static in oval layout — texture doesn't scroll. Just animate match actors + ball in place.
+  animateMatchActors(dt);
+  animateMatchBall(dt);
 }
 
-function animateMatchActors(dt, scrollSpeed) {
-  for (let i = matchActors.children.length - 1; i >= 0; i--) {
-    const a = matchActors.children[i];
-    a.position.z += scrollSpeed * dt;
-    if (a.position.z > 15) {
-      matchActors.remove(a);
-      a.traverse(disposeNode);
-      continue;
-    }
+function animateMatchActors(dt) {
+  for (const a of matchActors.children) {
     a.userData.phase += dt * a.userData.speed;
     const swing = Math.sin(a.userData.phase) * 0.7;
     a.userData.legL.rotation.x = swing;
@@ -1851,51 +1905,39 @@ function animateMatchActors(dt, scrollSpeed) {
     a.userData.armL.rotation.x = -swing * 0.7;
     a.userData.armR.rotation.x = swing * 0.7;
     a.position.y = Math.abs(Math.sin(a.userData.phase * 2)) * 0.05;
-    a.rotation.y += a.userData.driftDir * dt * 0.5;
-  }
-  // Respawn ahead so the match keeps populating
-  if (matchActors.children.length < 22 && Math.random() < dt * 1.2) {
-    spawnMatchActor(-TRACK_LEN + Math.random() * 40);
-  }
-  // Scroll coaches with the world
-  for (const c of coaches) {
-    c.position.z += scrollSpeed * dt;
-    if (c.position.z > 15) c.position.z -= TRACK_LEN;
   }
 }
 
-let matchBallVZ = 0, matchBallVX = 0;
-function animateMatchBall(dt, scrollSpeed) {
-  // Roll forward (z+) with world, and add a little kick wander
-  matchBall.position.z += scrollSpeed * dt + matchBallVZ * dt;
+let matchBallVZ = (Math.random() - 0.5) * 4, matchBallVX = (Math.random() - 0.5) * 4;
+function animateMatchBall(dt) {
   matchBall.position.x += matchBallVX * dt;
-  // Spin
+  matchBall.position.z += matchBallVZ * dt;
   if (matchBall.userData.ballMesh) matchBall.userData.ballMesh.rotation.x -= dt * 8;
-  // Keep on pitch — bounce off touchline / far line
-  if (matchBall.position.x > PITCH_INNER_X - 1) { matchBall.position.x = PITCH_INNER_X - 1; matchBallVX = -Math.abs(matchBallVX) - 1; }
-  if (matchBall.position.x < PITCH_FAR_X + 2)   { matchBall.position.x = PITCH_FAR_X + 2; matchBallVX = Math.abs(matchBallVX) + 1; }
-  // Recycle when past camera
-  if (matchBall.position.z > 12) {
-    matchBall.position.set(
-      PITCH_INNER_X - 4 - Math.random() * (PITCH_WIDTH - 10),
-      0.32,
-      -TRACK_LEN + 20 + Math.random() * 40
-    );
-    matchBallVZ = (Math.random() - 0.5) * 4;
-    matchBallVX = (Math.random() - 0.5) * 3;
+  // Bounce off pitch edges
+  const hx = PITCH_W / 2 - 1, hz = PITCH_L / 2 - 1;
+  if (matchBall.position.x >  hx) { matchBall.position.x =  hx; matchBallVX = -Math.abs(matchBallVX); }
+  if (matchBall.position.x < -hx) { matchBall.position.x = -hx; matchBallVX =  Math.abs(matchBallVX); }
+  if (matchBall.position.z >  hz) { matchBall.position.z =  hz; matchBallVZ = -Math.abs(matchBallVZ); }
+  if (matchBall.position.z < -hz) { matchBall.position.z = -hz; matchBallVZ =  Math.abs(matchBallVZ); }
+  // Occasional re-kick
+  if (Math.random() < dt * 0.3) {
+    matchBallVX = (Math.random() - 0.5) * 5;
+    matchBallVZ = (Math.random() - 0.5) * 5;
   }
 }
 function spinCoins(dt) {
   const t = performance.now() * 0.005;
   for (const c of coinGroup.children) {
     c.rotation.y += dt * 6;
-    c.position.y = c.userData.basY + Math.sin(t + c.position.z * 0.5) * 0.08;
+    if (c.userData.arcPos != null) {
+      const bob = Math.sin(t + c.userData.arcPos * 0.5) * 0.08;
+      c.position.y = (c.userData.basY ?? 0.9) + bob;
+    }
   }
 }
 function animatePlayerIdle() {
   const t = performance.now() * 0.002;
   player.position.y = Math.abs(Math.sin(t)) * 0.05;
-  player.rotation.y = Math.sin(t * 0.5) * 0.1;
   const swing = Math.sin(t * 2) * 0.2;
   player.userData.armL.rotation.x = -swing;
   player.userData.armR.rotation.x = swing;
