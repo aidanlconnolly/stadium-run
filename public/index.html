@@ -382,14 +382,14 @@ const DUGOUT_Y = 1.4;
 const GRAVITY = -26;
 const JUMP_V = 11;
 const SLIDE_DURATION = 0.7;
-const BASE_SPEED = 18;
-const MAX_SPEED = 36;
-const SPEED_GROWTH = 0.012;     // per meter
+const BASE_SPEED = 12;
+const MAX_SPEED = 28;
+const SPEED_GROWTH = 0.010;     // per meter
 const LANE_SWITCH_SPEED = 14;   // units per second
-const SPAWN_INTERVAL_BASE = 1.4;   // seconds between rows
-const SPAWN_INTERVAL_MIN = 0.55;
+const SPAWN_INTERVAL_BASE = 1.1;   // seconds between rows
+const SPAWN_INTERVAL_MIN = 0.45;
 const COIN_VALUE = 1;
-const FAR_Z = -180;
+const FAR_Z = -130;
 const DESPAWN_Z = 8;
 const PRESSURE_MS = 15000;
 const REF_FAR = 0.85;
@@ -400,43 +400,47 @@ const REF_CLOSE = 0.18;
 // =====================================================
 // The player runs counterclockwise around an oval track surrounding a rectangular pitch.
 // (logical S.distance, S.laneX) maps to world (x, z, yaw) via ovalAt().
-const STAD_RX_PITCH  = 30;   // inner radius (touches pitch boundary)
-const STAD_RZ_PITCH  = 44;
-const STAD_RX_TRACK  = 34;   // player centerline radius
-const STAD_RZ_TRACK  = 48;
-const STAD_RX_OUTER  = 38;   // outer edge of track / inner edge of stands
-const STAD_RZ_OUTER  = 52;
-const STAD_RX_ROOF   = 60;   // outer edge of roof / stands
-const STAD_RZ_ROOF   = 74;
-const PITCH_W = 54;          // rectangular pitch dimensions (inscribed in oval)
-const PITCH_L = 80;
+const STAD_RX_PITCH  = 46;   // inner radius (touches pitch boundary)
+const STAD_RZ_PITCH  = 64;
+const STAD_RX_TRACK  = 52;   // player centerline radius
+const STAD_RZ_TRACK  = 72;
+const STAD_RX_OUTER  = 58;   // outer edge of track / inner edge of stands
+const STAD_RZ_OUTER  = 80;
+const STAD_RX_ROOF   = 78;   // outer edge of roof / stands
+const STAD_RZ_ROOF   = 102;
+const PITCH_W = 68;          // rectangular pitch dimensions (inscribed in oval)
+const PITCH_L = 105;
 const HALFWAY_Z_OVAL = 0;    // halfway line of pitch in world Z
 
 // Ramanujan ellipse perimeter approximation at the player's lane
 const PLAYER_CIRC = Math.PI * (3 * (STAD_RX_TRACK + STAD_RZ_TRACK) -
   Math.sqrt((3 * STAD_RX_TRACK + STAD_RZ_TRACK) * (STAD_RX_TRACK + 3 * STAD_RZ_TRACK)));
 
-// Map (arcLen, radialOffset) → world {x, z, yaw}. radialOffset > 0 = away from oval center.
+// Map (arcLen, radialOffset) → world {x, z, yaw, tanx, tanz}.
+// radialOffset > 0 = to the RIGHT of the direction of travel (outward from oval center).
 function ovalAt(arcLen, radialOffset = 0) {
-  // theta increases counterclockwise. Start at +x axis. After 1/4 lap at +z axis.
   const theta = (arcLen / PLAYER_CIRC) * 2 * Math.PI;
   const ct = Math.cos(theta), st = Math.sin(theta);
-  // Centerline (player's lane=0 path)
+  // Centerline
   const cx = STAD_RX_TRACK * ct;
   const cz = STAD_RZ_TRACK * st;
-  // Tangent direction (direction of motion)
+  // Tangent direction (direction of motion, unnormalized)
   const tx = -STAD_RX_TRACK * st;
   const tz =  STAD_RZ_TRACK * ct;
   const tlen = Math.hypot(tx, tz);
-  // Outward normal (perpendicular to tangent, rotated 90° CW)
-  const onx = tz / tlen;
-  const onz = -tx / tlen;
-  const x = cx + radialOffset * onx;
-  const z = cz + radialOffset * onz;
+  // Unit tangent
+  const tanx = tx / tlen;
+  const tanz = tz / tlen;
+  // Right-of-travel normal: rotate tangent 90° CW → (tanz, -tanx)
+  // radialOffset > 0 = screen-right (outward from oval), < 0 = screen-left (inward)
+  const x = cx + radialOffset * tanz;
+  const z = cz + radialOffset * (-tanx);
   return {
     x, z,
     yaw: Math.atan2(tx, tz),
     theta,
+    tanx,   // unit tangent x (direction of travel)
+    tanz,   // unit tangent z
   };
 }
 
@@ -552,7 +556,7 @@ renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xa3c8e8);
-scene.fog = new THREE.Fog(0xc6dcef, 110, 280);
+scene.fog = new THREE.Fog(0xc6dcef, 140, 420);
 
 const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 400);
 // Initial camera position: behind player at theta=0 on the oval (calibrated when ovalAt is available)
@@ -585,15 +589,17 @@ const fill = new THREE.DirectionalLight(0xb8d2f0, 0.35);
 fill.position.set(20, 14, -6);
 scene.add(fill);
 // Floodlight pylons are present visually but contribute mild light during the day
-for (const [px, pz] of [[-40, -10], [10, -10], [-40, -180], [10, -180]]) {
-  const s = new THREE.PointLight(0xfff8e8, 0.35, 60, 1.4);
-  s.position.set(px, 24, pz);
+// Floodlights at the 4 pylon positions (45° intervals around the oval)
+for (let fi = 0; fi < 4; fi++) {
+  const ftheta = (fi + 0.5) * Math.PI / 2;
+  const s = new THREE.PointLight(0xfff8e8, 0.40, 160, 1.2);
+  s.position.set((STAD_RX_ROOF + 2) * Math.cos(ftheta), 28, (STAD_RZ_ROOF + 2) * Math.sin(ftheta));
   scene.add(s);
 }
 
 // ----- Sky / gradient backdrop -----
 {
-  const skyGeo = new THREE.SphereGeometry(220, 24, 16);
+  const skyGeo = new THREE.SphereGeometry(400, 24, 16);
   const skyMat = new THREE.ShaderMaterial({
     uniforms: {
       top:    { value: new THREE.Color(0x5c95c8) },
@@ -1270,21 +1276,34 @@ function buildRunner(opts = {}) {
   const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.10, 0.12, 0.16, 10), skinMat);
   neck.position.y = 1.83; neck.castShadow = true; g.add(neck);
 
-  // ----- Head -----
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 16, 14), skinMat);
-  head.position.y = 2.05; head.castShadow = true;
-  // Slight vertical squash for a more human shape
-  head.scale.set(1.0, 1.05, 1.0);
+  // ----- Head — bigger for Temple Run / Subway Surfers proportions -----
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.32, 16, 14), skinMat);
+  head.position.y = 2.12; head.castShadow = true;
+  head.scale.set(1.0, 1.08, 1.0);
   g.add(head);
 
-  // Hair cap — covers top of head, slightly raised in back
-  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.275, 16, 12, 0, Math.PI * 2, 0, Math.PI / 1.95), hairMat);
-  hair.position.y = 2.07; hair.castShadow = true; g.add(hair);
+  // Hair cap
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.335, 16, 12, 0, Math.PI * 2, 0, Math.PI / 1.85), hairMat);
+  hair.position.y = 2.14; hair.castShadow = true; g.add(hair);
 
-  // Ears (small)
-  const earGeo = new THREE.SphereGeometry(0.045, 6, 5);
-  const earL = new THREE.Mesh(earGeo, skinMat); earL.position.set(-0.245, 2.04, 0.02); g.add(earL);
-  const earR = new THREE.Mesh(earGeo, skinMat); earR.position.set( 0.245, 2.04, 0.02); g.add(earR);
+  // Ears
+  const earGeo = new THREE.SphereGeometry(0.055, 6, 5);
+  const earL = new THREE.Mesh(earGeo, skinMat); earL.position.set(-0.295, 2.10, 0.02); g.add(earL);
+  const earR = new THREE.Mesh(earGeo, skinMat); earR.position.set( 0.295, 2.10, 0.02); g.add(earR);
+
+  // Eyes — white sclera + dark iris
+  const scleraGeo = new THREE.SphereGeometry(0.072, 8, 6);
+  const scleraMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.4 });
+  const eyeL = new THREE.Mesh(scleraGeo, scleraMat);
+  eyeL.position.set(-0.110, 2.16, 0.29); eyeL.scale.set(1, 0.85, 0.7); g.add(eyeL);
+  const eyeR = new THREE.Mesh(scleraGeo, scleraMat);
+  eyeR.position.set( 0.110, 2.16, 0.29); eyeR.scale.set(1, 0.85, 0.7); g.add(eyeR);
+  const irisGeo = new THREE.SphereGeometry(0.042, 7, 5);
+  const irisMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+  const irisL = new THREE.Mesh(irisGeo, irisMat);
+  irisL.position.set(-0.110, 2.16, 0.355); g.add(irisL);
+  const irisR = new THREE.Mesh(irisGeo, irisMat);
+  irisR.position.set( 0.110, 2.16, 0.355); g.add(irisR);
 
   // ----- Arms: upper + forearm + hand -----
   function makeArm(side) {
@@ -1706,12 +1725,11 @@ function update(dt) {
     if (S.phase === 'menu' || S.phase === 'paused') {
       const t = performance.now() * 0.00006;
       const idleArc = (S.distance || 0) + t * 30;
-      const cw = ovalAt(idleArc - 7, 0);
-      camera.position.set(cw.x, 5.4, cw.z);
-      const lk = ovalAt(idleArc + 4, 0);
-      camera.lookAt(lk.x, 1.5, lk.z);
-      // Park the player on the oval too
       const pw = ovalAt(idleArc, 0);
+      // Camera directly behind along tangent
+      camera.position.set(pw.x - pw.tanx * 8, 5.4, pw.z - pw.tanz * 8);
+      camera.lookAt(pw.x + pw.tanx * 6, 1.5, pw.z + pw.tanz * 6);
+      // Park the player on the oval too
       player.position.set(pw.x, GROUND_Y, pw.z);
       player.rotation.y = pw.yaw;
       animatePlayerIdle();
@@ -1792,15 +1810,15 @@ function update(dt) {
   } else {
     player.scale.set(1, 1, 1);
   }
-  // Obstacles
+  // Obstacles — use LANE_X so they align with the player's lane radials
   for (const o of obstacleGroup.children) {
-    const wp = ovalAt(o.userData.arcPos, o.userData.lane * LANE_W - 0);
+    const wp = ovalAt(o.userData.arcPos, LANE_X[o.userData.lane]);
     o.position.set(wp.x, o.userData.yBase || 0, wp.z);
     o.rotation.y = wp.yaw;
   }
-  // Coins
+  // Coins — same fix
   for (const c of coinGroup.children) {
-    const wp = ovalAt(c.userData.arcPos, c.userData.lane * LANE_W);
+    const wp = ovalAt(c.userData.arcPos, LANE_X[c.userData.lane]);
     c.position.set(wp.x, c.position.y || c.userData.yBase || 0.9, wp.z);
   }
 
@@ -1822,7 +1840,7 @@ function update(dt) {
   for (let i = coinGroup.children.length - 1; i >= 0; i--) {
     const c = coinGroup.children[i];
     if (c.userData.lane !== S.lane) continue;
-    if (Math.abs(c.userData.arcPos - S.distance) > 0.7) continue;
+    if (Math.abs(c.userData.arcPos - S.distance) > 1.4) continue;
     const dy = Math.abs((S.y + playerHeight / 2) - c.position.y);
     if (dy < 1.0) {
       coinGroup.remove(c); c.geometry.dispose(); c.material.dispose();
@@ -1867,18 +1885,20 @@ function update(dt) {
   referee.userData.armL.rotation.x = -swing * 0.8;
   referee.userData.armR.rotation.x = swing * 0.8;
 
-  // Camera — follow the player around the oval from behind
-  const camArcBehind = 7;
-  const camWp = ovalAt(S.distance - camArcBehind, S.laneX * 0.4);
-  camera.position.set(
-    camWp.x,
-    5.4 + Math.max(0, S.y) * 0.15 + S.cameraShake * Math.sin(now * 0.08),
-    camWp.z,
-  );
+  // Camera — place directly behind the player along the tangent direction.
+  // Using playerWp.tanx / .tanz ensures screen-left = track-left regardless of oval position.
   S.cameraShake *= Math.pow(0.001, dt);
-  // Look slightly ahead of the player along the oval
-  const lookWp = ovalAt(S.distance + 5, S.laneX * 0.2);
-  camera.lookAt(lookWp.x, 1.5 + Math.max(0, S.y) * 0.3, lookWp.z);
+  const camDist = 9;
+  camera.position.set(
+    playerWp.x - playerWp.tanx * camDist,
+    5.6 + Math.max(0, S.y) * 0.18 + S.cameraShake * Math.sin(now * 0.08),
+    playerWp.z - playerWp.tanz * camDist,
+  );
+  camera.lookAt(
+    playerWp.x + playerWp.tanx * 8,
+    1.6 + Math.max(0, S.y) * 0.3,
+    playerWp.z + playerWp.tanz * 8,
+  );
 
   // HUD
   hudCoins.textContent = S.coinsRun.toString();
@@ -1955,7 +1975,7 @@ function disposeNode(node) {
 // HIT / GAME OVER
 // =====================================================
 function onHit() {
-  S.iframeUntil = performance.now() + 900;
+  S.iframeUntil = performance.now() + 1400;
   S.lives -= 1;
   S.cameraShake = 0.35;
   refreshHearts();
