@@ -394,7 +394,7 @@ const LANE_SWITCH_SPEED = 14;   // units per second
 const SPAWN_INTERVAL_BASE = 1.1;   // seconds between rows
 const SPAWN_INTERVAL_MIN = 0.45;
 const COIN_VALUE = 1;
-const FAR_Z = -130;
+const FAR_Z = -180;
 const DESPAWN_Z = 8;
 const PRESSURE_MS = 15000;
 const REF_FAR = 0.85;
@@ -405,16 +405,16 @@ const REF_CLOSE = 0.18;
 // =====================================================
 // The player runs counterclockwise around an oval track surrounding a rectangular pitch.
 // (logical S.distance, S.laneX) maps to world (x, z, yaw) via ovalAt().
-const STAD_RX_PITCH  = 46;   // inner radius (touches pitch boundary)
-const STAD_RZ_PITCH  = 64;
-const STAD_RX_TRACK  = 52;   // player centerline radius
-const STAD_RZ_TRACK  = 72;
-const STAD_RX_OUTER  = 58;   // outer edge of track / inner edge of stands
-const STAD_RZ_OUTER  = 80;
-const STAD_RX_ROOF   = 78;   // outer edge of roof / stands
-const STAD_RZ_ROOF   = 102;
+const STAD_RX_PITCH  = 58;   // inner radius (touches pitch boundary)
+const STAD_RZ_PITCH  = 94;
+const STAD_RX_TRACK  = 65;   // player centerline radius
+const STAD_RZ_TRACK  = 102;
+const STAD_RX_OUTER  = 72;   // outer edge of track / inner edge of stands
+const STAD_RZ_OUTER  = 112;
+const STAD_RX_ROOF   = 94;   // outer edge of roof / stands
+const STAD_RZ_ROOF   = 138;
 const PITCH_W = 68;          // rectangular pitch dimensions (inscribed in oval)
-const PITCH_L = 105;
+const PITCH_L = 130;
 const HALFWAY_Z_OVAL = 0;    // halfway line of pitch in world Z
 
 // Ramanujan ellipse perimeter approximation at the player's lane
@@ -561,7 +561,7 @@ renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xa3c8e8);
-scene.fog = new THREE.Fog(0xc6dcef, 140, 420);
+scene.fog = new THREE.Fog(0xc6dcef, 180, 560);
 
 const camera = new THREE.PerspectiveCamera(62, 1, 0.1, 400);
 // Initial camera position: behind player at theta=0 on the oval (calibrated when ovalAt is available)
@@ -818,6 +818,34 @@ function buildGoalpost() {
   scene.add(g2);
 }
 
+// ----- World Cup corner flags -----
+{
+  const flagColors = [0xbf0a30, 0x002868, 0xffd400, 0x6cb4e4]; // USA red, USA blue, Brazil yellow, Argentina blue
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 });
+  const corners = [
+    [ PITCH_W / 2,  PITCH_L / 2],
+    [-PITCH_W / 2,  PITCH_L / 2],
+    [ PITCH_W / 2, -PITCH_L / 2],
+    [-PITCH_W / 2, -PITCH_L / 2],
+  ];
+  corners.forEach(([cx, cz], i) => {
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.6, 6), poleMat);
+    pole.position.set(cx, 0.8, cz);
+    scene.add(pole);
+    // Flag — small triangle pointing outward from corner
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0); shape.lineTo(0.55, 0.2); shape.lineTo(0, 0.4); shape.closePath();
+    const flagGeo = new THREE.ShapeGeometry(shape);
+    const flagMesh = new THREE.Mesh(flagGeo, new THREE.MeshBasicMaterial({
+      color: flagColors[i], side: THREE.DoubleSide,
+    }));
+    flagMesh.position.set(cx, 1.6, cz);
+    // Rotate flag to face outward from pitch corner
+    flagMesh.rotation.y = Math.atan2(cx, cz) + Math.PI / 2;
+    scene.add(flagMesh);
+  });
+}
+
 // ----- Soccer ball on the pitch (free-moving) -----
 const matchBall = (() => {
   const g = new THREE.Group();
@@ -858,7 +886,8 @@ const TIERS = 6;
 const TIER_STEP_R = 1.6;
 const TIER_STEP_Y = 1.5;
 const TIER_DEPTH = 2.1;
-const SEG_BAND_COLORS = [0xa1102b, 0x0d4ea6, 0xffd400, 0x0a5b2c, 0xffffff, 0x6600cc];
+// World Cup 2026 branded seating bands — USA (red/white/blue), Argentina blue, Brazil yellow, England red, France navy, Germany white
+const SEG_BAND_COLORS = [0xbf0a30, 0x002868, 0xffffff, 0x6cb4e4, 0xffd400, 0xd62828, 0x002395, 0xeaeaea];
 
 {
   // Compute average segment arc width at the outer edge
@@ -884,7 +913,8 @@ const SEG_BAND_COLORS = [0xa1102b, 0x0d4ea6, 0xffd400, 0x0a5b2c, 0xffffff, 0x660
 
   const dummy = new THREE.Object3D();
   const col = new THREE.Color();
-  const adColors = [0xd11111, 0x0066cc, 0x008844, 0xffaa00, 0xaa1100, 0xff8800];
+  // Pitch-side advertising boards — WC 2026 sponsor palette
+  const adColors = [0xbf0a30, 0x002868, 0xffd400, 0x6cb4e4, 0x002395, 0xffffff, 0xd62828, 0xffa500];
 
   for (let i = 0; i < SEGS; i++) {
     const tm = ((i + 0.5) / SEGS) * 2 * Math.PI;
@@ -1094,7 +1124,7 @@ const jumboGroup = { screen: null };
   jumbo.rotation.y = Math.PI; // face toward pitch
   scene.add(jumbo);
   const screenCanvas = document.createElement('canvas');
-  screenCanvas.width = 512; screenCanvas.height = 240;
+  screenCanvas.width = 512; screenCanvas.height = 200;
   const screenTex = new THREE.CanvasTexture(screenCanvas);
   const screen = new THREE.Mesh(
     new THREE.PlaneGeometry(13, 5.5),
@@ -1182,19 +1212,40 @@ const coaches = [];
 function updateJumbotron(coins, distance) {
   if (!jumboGroup.screen) return;
   const { canvas, tex } = jumboGroup.screen;
+  const w = canvas.width, h = canvas.height;
   const cx = canvas.getContext('2d');
-  cx.fillStyle = '#08121b';
-  cx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Background — dark navy
+  cx.fillStyle = '#04080f';
+  cx.fillRect(0, 0, w, h);
+
+  // Top stripe — WC 2026 red/white/blue tricolor
+  cx.fillStyle = '#bf0a30';  cx.fillRect(0, 0, w, 14);
+  cx.fillStyle = '#ffffff';  cx.fillRect(0, 14, w, 6);
+  cx.fillStyle = '#002868';  cx.fillRect(0, 20, w, 14);
+
+  // Trophy emoji / WC 2026 text header
   cx.fillStyle = '#ffd24a';
-  cx.font = 'bold 64px system-ui, sans-serif';
+  cx.font = 'bold 20px system-ui, sans-serif';
   cx.textAlign = 'center';
-  cx.fillText(coins.toString(), canvas.width / 2, 80);
+  cx.fillText('🏆 FIFA WORLD CUP 2026 🏆', w / 2, 58);
+
+  // Coins — big gold number
+  cx.fillStyle = '#ffd24a';
+  cx.font = 'bold 72px system-ui, sans-serif';
+  cx.fillText(coins.toString(), w / 2, 145);
+
+  // Labels row
   cx.fillStyle = '#dfe8f0';
-  cx.font = 'bold 22px system-ui, sans-serif';
-  cx.fillText('COINS', canvas.width / 2, 110);
-  cx.fillStyle = '#7c95a8';
   cx.font = 'bold 18px system-ui, sans-serif';
-  cx.fillText(Math.floor(distance) + 'M', canvas.width / 2, 140);
+  cx.fillText('COINS', w / 2 - 80, 175);
+  cx.fillStyle = '#7c95a8';
+  cx.font = 'bold 16px system-ui, sans-serif';
+  cx.fillText(Math.floor(distance) + ' M', w / 2 + 70, 175);
+
+  // Bottom stripe
+  cx.fillStyle = '#002868';  cx.fillRect(0, h - 14, w, 14);
+
   tex.needsUpdate = true;
 }
 
@@ -1447,14 +1498,20 @@ const coinGroup = new THREE.Group();
 scene.add(obstacleGroup);
 scene.add(coinGroup);
 
-// Team colors for banners
+// Team colors for banners — FIFA World Cup 2026 nations
 const TEAM_COLORS = [
-  { top: 0x6cb4e4, bottom: 0xffffff, name: 'ARG' },
-  { top: 0xffd400, bottom: 0x0d4ea6, name: 'BRA' },
-  { top: 0xffffff, bottom: 0x111111, name: 'GER' },
-  { top: 0x0d2a6b, bottom: 0xffffff, name: 'FRA' },
-  { top: 0xa1102b, bottom: 0x0a5b2c, name: 'POR' },
-  { top: 0xd62828, bottom: 0xffffff, name: 'ENG' },
+  { top: 0x6cb4e4, bottom: 0xffffff, name: 'ARG' },   // Argentina sky blue & white
+  { top: 0xffd400, bottom: 0x0d4ea6, name: 'BRA' },   // Brazil yellow & blue
+  { top: 0xffffff, bottom: 0x111111, name: 'GER' },   // Germany white & black
+  { top: 0x002395, bottom: 0xed2939, name: 'FRA' },   // France blue & red
+  { top: 0xa1102b, bottom: 0x0a5b2c, name: 'POR' },   // Portugal red & green
+  { top: 0xd62828, bottom: 0xffffff, name: 'ENG' },   // England red & white
+  { top: 0xcc0000, bottom: 0xcc0000, name: 'ESP' },   // Spain red
+  { top: 0xffa500, bottom: 0xffa500, name: 'NED' },   // Netherlands orange
+  { top: 0x003087, bottom: 0xffffff, name: 'USA' },   // USA blue & white
+  { top: 0xce1126, bottom: 0xffffff, name: 'MEX' },   // Mexico red & white
+  { top: 0x002868, bottom: 0xbf0a30, name: 'URU' },   // Uruguay blue & red
+  { top: 0x0057a8, bottom: 0xfcd116, name: 'COL' },   // Colombia yellow & blue
 ];
 
 function makeObstacle(kind, lane, z) {
