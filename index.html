@@ -376,7 +376,12 @@ import * as THREE from 'three';
 // CONSTANTS
 // =====================================================
 const LANE_W = 2.2;
-const LANE_X = [-LANE_W, 0, LANE_W];
+// LANE_X is deliberately [+LANE_W, 0, -LANE_W] (not the intuitive order).
+// Three.js camera facing forward along +tangent has screen-right = -radial-outward,
+// so we flip the sign: LANE_X[0] = outward (+2.2) = screen-LEFT,
+//                      LANE_X[2] = inward  (−2.2) = screen-RIGHT.
+// Result: ArrowLeft→lane 0→screen-left ✓  ArrowRight→lane 2→screen-right ✓
+const LANE_X = [LANE_W, 0, -LANE_W];
 const GROUND_Y = 0;
 const DUGOUT_Y = 1.4;
 const GRAVITY = -26;
